@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/gcash/bchd/chaincfg"
+	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
 )
 

@@ -12,16 +12,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/lightninglabs/neutrino/headerfs"
-	"github.com/lightninglabs/neutrino/headerlist"
+	"github.com/gcash/bchd/blockchain"
+	"github.com/gcash/bchd/chaincfg"
+	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
+	"github.com/gcash/neutrino/headerfs"
+	"github.com/gcash/neutrino/headerlist"
 )
 
 const (
@@ -83,7 +83,7 @@ type donePeerMsg struct {
 // txMsg packages a bitcoin tx message and the peer it came from together
 // so the block handler has access to that information.
 type txMsg struct {
-	tx   *btcutil.Tx
+	tx   *bchutil.Tx
 	peer *ServerPeer
 }
 
@@ -2323,7 +2323,7 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	if err != nil {
 		return err
 	}
-	stubBlock := btcutil.NewBlock(&wire.MsgBlock{
+	stubBlock := bchutil.NewBlock(&wire.MsgBlock{
 		Header: *blockHeader,
 	})
 	err = blockchain.CheckProofOfWork(stubBlock,

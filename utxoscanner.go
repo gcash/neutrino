@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchutil"
+	"github.com/gcash/bchwallet/waddrmgr"
 )
 
 // getUtxoResult is a simple pair type holding a spend report and error.
@@ -90,7 +90,7 @@ type UtxoScannerConfig struct {
 	BlockFilterMatches func(ro *rescanOptions, blockHash *chainhash.Hash) (bool, error)
 
 	// GetBlock fetches a block from the p2p network.
-	GetBlock func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
+	GetBlock func(chainhash.Hash, ...QueryOption) (*bchutil.Block, error)
 }
 
 // UtxoScanner batches calls to GetUtxo so that a single scan can search for

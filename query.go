@@ -8,15 +8,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/gcash/bchd/blockchain"
+	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/davecgh/go-spew/spew"
-	"github.com/lightninglabs/neutrino/cache"
-	"github.com/lightninglabs/neutrino/filterdb"
+	"github.com/gcash/neutrino/cache"
+	"github.com/gcash/neutrino/filterdb"
 )
 
 var (
@@ -37,7 +37,7 @@ var (
 
 	// QueryEncoding specifies the default encoding (witness or not) for
 	// `getdata` and other similar messages.
-	QueryEncoding = wire.WitnessEncoding
+	QueryEncoding = wire.BaseEncoding
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -882,7 +882,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 // time, until one answers. If the block is found in the cache, it will be
 // returned immediately.
 func (s *ChainService) GetBlock(blockHash chainhash.Hash,
-	options ...QueryOption) (*btcutil.Block, error) {
+	options ...QueryOption) (*bchutil.Block, error) {
 
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block so we
@@ -898,7 +898,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// to use.
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
-	invType := wire.InvTypeWitnessBlock
+	invType := wire.InvTypeBlock
 	if qo.encoding == wire.BaseEncoding {
 		invType = wire.InvTypeBlock
 	}
@@ -923,7 +923,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// which is always called single-threadedly. We don't check the block
 	// until after the query is finished, so we can just write to it
 	// naively.
-	var foundBlock *btcutil.Block
+	var foundBlock *bchutil.Block
 	s.queryPeers(
 		// Send a wire.GetDataMsg
 		getData,
@@ -946,11 +946,11 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 				if response.BlockHash() != blockHash {
 					return
 				}
-				block := btcutil.NewBlock(response)
+				block := bchutil.NewBlock(response)
 
-				// Only set height if btcutil hasn't
+				// Only set height if bchutil hasn't
 				// automagically put one in.
-				if block.Height() == btcutil.BlockHeightUnknown {
+				if block.Height() == bchutil.BlockHeightUnknown {
 					block.SetHeight(int32(height))
 				}
 
@@ -1017,7 +1017,7 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// messages for the transaction.
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
-	invType := wire.InvTypeWitnessTx
+	invType := wire.InvTypeBlock
 	if qo.encoding == wire.BaseEncoding {
 		invType = wire.InvTypeTx
 	}

@@ -3,11 +3,11 @@ package filterdb
 import (
 	"fmt"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/gcash/bchd/chaincfg"
+	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
+	"github.com/gcash/bchwallet/walletdb"
 )
 
 var (

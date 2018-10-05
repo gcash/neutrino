@@ -1,17 +1,17 @@
 package neutrino
 
 import (
-	"github.com/btcsuite/btcd/addrmgr"
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/peer"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btclog"
+	"github.com/gcash/bchd/addrmgr"
+	"github.com/gcash/bchd/blockchain"
+	"github.com/gcash/bchd/peer"
+	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchlog"
 )
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
 // requests it.
-var log btclog.Logger
+var log bchlog.Logger
 
 // The default amount of logging is none.
 func init() {
@@ -21,13 +21,13 @@ func init() {
 // DisableLog disables all library log output.  Logging output is disabled
 // by default until either UseLogger or SetLogWriter are called.
 func DisableLog() {
-	log = btclog.Disabled
+	log = bchlog.Disabled
 }
 
 // UseLogger uses a specified Logger to output package logging info.
 // This should be used in preference to SetLogWriter if the caller is also
 // using btclog.
-func UseLogger(logger btclog.Logger) {
+func UseLogger(logger bchlog.Logger) {
 	log = logger
 	blockchain.UseLogger(logger)
 	txscript.UseLogger(logger)

@@ -14,10 +14,11 @@
 .glide/
 
 # Glide vendor subdirectory
-vendor/
+vendor
 
 #GoLand config files
 .idea
+*.iml
 *.DS_Store
 
 # vim swap files
