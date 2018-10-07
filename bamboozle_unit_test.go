@@ -12,7 +12,7 @@ import (
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/walletdb"
-	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/gcash/neutrino/headerfs"
 )
 
 func decodeHashNoError(str string) *chainhash.Hash {
