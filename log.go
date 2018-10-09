@@ -26,7 +26,7 @@ func DisableLog() {
 
 // UseLogger uses a specified Logger to output package logging info.
 // This should be used in preference to SetLogWriter if the caller is also
-// using btclog.
+// using bchlog.
 func UseLogger(logger bchlog.Logger) {
 	log = logger
 	blockchain.UseLogger(logger)
