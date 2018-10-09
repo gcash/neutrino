@@ -2351,7 +2351,6 @@ func (b *blockManager) selectDifficultyAdjustmentAlgorithm(height int32) blockch
 	return blockchain.DifficultyLegacy
 }
 
-
 // getSuitableBlock locates the two parents of passed in block, sorts the three
 // blocks by timestamp and returns the median.
 func (b *blockManager) getSuitableBlock(node0, node1, node2 *headerlist.Node) (*headerlist.Node, error) {
@@ -2385,7 +2384,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 		return b.server.chainParams.PowLimitBits, nil
 	}
 
-	algorithm := b.selectDifficultyAdjustmentAlgorithm(lastNode.Height+1)
+	algorithm := b.selectDifficultyAdjustmentAlgorithm(lastNode.Height + 1)
 
 	// If we're still using a legacy algorithm
 	if algorithm != blockchain.DifficultyDAA {
@@ -2418,7 +2417,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	headerMap[node2.Height] = node2
 
 	prev := node2
-	for i:=0; i<blockchain.DifficultyAdjustmentWindow-3; i++ {
+	for i := 0; i < blockchain.DifficultyAdjustmentWindow-3; i++ {
 		headerMap[prev.Height] = prev
 		prev = prev.Prev()
 	}
@@ -2444,7 +2443,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 	// Add up the work done from the first to last suitable blocks.
 	work := big.NewInt(0)
-	for i:=suitableFirstNode.Height; i<suitableLastNode.Height; i++ {
+	for i := suitableFirstNode.Height; i < suitableLastNode.Height; i++ {
 		node := headerMap[i]
 		work = work.Add(work, blockchain.CompactToBig(node.Header.Bits))
 	}

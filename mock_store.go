@@ -8,6 +8,7 @@ import (
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/neutrino/headerfs"
+	"time"
 )
 
 // mockBlockHeaderStore is an implementation of the BlockHeaderStore backed by
@@ -56,6 +57,10 @@ func (m *mockBlockHeaderStore) HeightFromHash(*chainhash.Hash) (uint32, error) {
 func (m *mockBlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp,
 	error) {
 	return nil, nil
+}
+
+func (m *mockBlockHeaderStore) CalcPastMedianTime(header *wire.BlockHeader) (time.Time, error) {
+	return time.Time{}, nil
 }
 
 func (m *mockBlockHeaderStore) FetchHeader(h *chainhash.Hash) (

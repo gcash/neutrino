@@ -15,8 +15,8 @@ import (
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
-	"time"
 	"sort"
+	"time"
 )
 
 // BlockHeaderStore is an interface that provides an abstraction for a generic
