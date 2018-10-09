@@ -2318,6 +2318,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	maxTimestamp time.Time, reorgAttempt bool) error {
+
 	diff, err := b.calcNextRequiredDifficulty(
 		blockHeader.Timestamp, reorgAttempt)
 	if err != nil {
@@ -2339,10 +2340,143 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	return nil
 }
 
+// selectDifficultyAdjustmentAlgorithm returns the difficulty adjustment algorithm that
+// should be used when validating a block at the given height.
+func (b *blockManager) selectDifficultyAdjustmentAlgorithm(height int32) blockchain.DifficultyAlgorithm {
+	if height > b.server.chainParams.UahfForkHeight && height <= b.server.chainParams.DaaForkHeight {
+		return blockchain.DifficultyEDA
+	} else if height > b.server.chainParams.DaaForkHeight {
+		return blockchain.DifficultyDAA
+	}
+	return blockchain.DifficultyLegacy
+}
+
+
+// getSuitableBlock locates the two parents of passed in block, sorts the three
+// blocks by timestamp and returns the median.
+func (b *blockManager) getSuitableBlock(node0, node1, node2 *headerlist.Node) (*headerlist.Node, error) {
+	blocks := []*headerlist.Node{node2, node1, node0}
+	if blocks[0].Header.Timestamp.Unix() > blocks[2].Header.Timestamp.Unix() {
+		blocks[0], blocks[2] = blocks[2], blocks[0]
+	}
+	if blocks[0].Header.Timestamp.Unix() > blocks[1].Header.Timestamp.Unix() {
+		blocks[0], blocks[1] = blocks[1], blocks[0]
+	}
+	if blocks[1].Header.Timestamp.Unix() > blocks[2].Header.Timestamp.Unix() {
+		blocks[1], blocks[2] = blocks[2], blocks[1]
+	}
+	return blocks[1], nil
+}
+
 // calcNextRequiredDifficulty calculates the required difficulty for the block
 // after the passed previous block node based on the difficulty retarget rules.
 func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	reorgAttempt bool) (uint32, error) {
+
+	hList := b.headerList
+	if reorgAttempt {
+		hList = b.reorgList
+	}
+
+	lastNode := hList.Back()
+
+	// Genesis block.
+	if lastNode == nil {
+		return b.server.chainParams.PowLimitBits, nil
+	}
+
+	algorithm := b.selectDifficultyAdjustmentAlgorithm(lastNode.Height+1)
+
+	// If we're still using a legacy algorithm
+	if algorithm != blockchain.DifficultyDAA {
+		return b.calcLegacyRequiredDifficulty(newBlockTime, reorgAttempt, algorithm)
+	}
+
+	// For networks that support it, allow special reduction of the
+	// required difficulty once too much time has elapsed without
+	// mining a block.
+	if b.server.chainParams.ReduceMinDifficulty {
+		// Return minimum difficulty when more than the desired
+		// amount of time has elapsed without mining a block.
+		reductionTime := int64(b.server.chainParams.MinDiffReductionTime /
+			time.Second)
+		allowMinTime := lastNode.Header.Timestamp.Unix() + reductionTime
+		if newBlockTime.Unix() > allowMinTime {
+			return b.server.chainParams.PowLimitBits, nil
+		}
+	}
+
+	// We need to calculate the work differential between the first and last
+	// suitable nodes, however we aren't tracking total work in the db.
+	// Fortunately we enough data in memory to calculate it.
+	headerMap := make(map[int32]*headerlist.Node)
+	node0 := lastNode
+	node1 := node0.Prev()
+	node2 := node1.Prev()
+	headerMap[node0.Height] = node0
+	headerMap[node1.Height] = node1
+	headerMap[node2.Height] = node2
+
+	prev := node2
+	for i:=0; i<blockchain.DifficultyAdjustmentWindow-3; i++ {
+		headerMap[prev.Height] = prev
+		prev = prev.Prev()
+	}
+
+	node144 := prev
+	node145 := prev.Prev()
+	node146 := prev.Prev()
+	headerMap[node144.Height] = node144
+	headerMap[node145.Height] = node145
+	headerMap[node146.Height] = node146
+
+	// Find the suitable blocks to use as the first and last nodes for the
+	// purpose of the difficulty calculation. A suitable block is the median
+	// timestamp out of the three prior.
+	suitableLastNode, err := b.getSuitableBlock(node0, node1, node2)
+	if err != nil {
+		return 0, err
+	}
+	suitableFirstNode, err := b.getSuitableBlock(node144, node145, node146)
+	if err != nil {
+		return 0, err
+	}
+
+	// Add up the work done from the first to last suitable blocks.
+	work := big.NewInt(0)
+	for i:=suitableFirstNode.Height; i<suitableLastNode.Height; i++ {
+		node := headerMap[i]
+		work = work.Add(work, blockchain.CompactToBig(node.Header.Bits))
+	}
+
+	// In order to avoid difficulty cliffs, we bound the amplitude of the
+	// adjustement we are going to do.
+	duration := suitableLastNode.Header.Timestamp.Unix() - suitableFirstNode.Header.Timestamp.Unix()
+	if duration > 288*int64(b.server.chainParams.TargetTimePerBlock.Seconds()) {
+		duration = 288 * int64(b.server.chainParams.TargetTimePerBlock.Seconds())
+	} else if duration < 72*int64(b.server.chainParams.TargetTimePerBlock.Seconds()) {
+		duration = 72 * int64(b.server.chainParams.TargetTimePerBlock.Seconds())
+	}
+
+	projectedWork := new(big.Int).Mul(work, big.NewInt(int64(b.server.chainParams.TargetTimePerBlock.Seconds())))
+
+	pw := new(big.Int).Div(projectedWork, big.NewInt(duration))
+
+	e := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
+
+	nt := new(big.Int).Sub(e, pw)
+
+	newTarget := new(big.Int).Div(nt, pw)
+
+	// clip again if above minimum target (too easy)
+	if newTarget.Cmp(b.server.chainParams.PowLimit) > 0 {
+		newTarget.Set(b.server.chainParams.PowLimit)
+	}
+	return blockchain.BigToCompact(newTarget), nil
+}
+
+func (b *blockManager) calcLegacyRequiredDifficulty(newBlockTime time.Time,
+	reorgAttempt bool, algorithm blockchain.DifficultyAlgorithm) (uint32, error) {
 
 	hList := b.headerList
 	if reorgAttempt {
@@ -2382,6 +2516,54 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 				return 0, err
 			}
 			return prevBits, nil
+		}
+
+		// If we're using the EDA check if we need to perform an emergency
+		// difficulty adjustment
+		if algorithm == blockchain.DifficultyEDA {
+			// We can't go bellow the minimum, so early bail.
+			oldTarget := blockchain.CompactToBig(lastNode.Header.Bits)
+			if oldTarget.Cmp(b.server.chainParams.PowLimit) == 0 {
+				return blockchain.BigToCompact(b.server.chainParams.PowLimit), nil
+			}
+			// If producing the last 6 block took less than 12h, we keep the same
+			// difficulty.
+			firstNode, err := b.server.BlockHeaders.FetchHeaderByHeight(
+				uint32(lastNode.Height - 6),
+			)
+			if firstNode == nil {
+				return 0, err
+			}
+			lastHeader := lastNode.Header
+			medianTimeLast, err := b.server.BlockHeaders.CalcPastMedianTime(&lastHeader)
+			if err != nil {
+				return 0, err
+			}
+			medianTimeFirst, err := b.server.BlockHeaders.CalcPastMedianTime(firstNode)
+			if err != nil {
+				return 0, err
+			}
+			mtp6Blocks := medianTimeLast.Sub(medianTimeFirst)
+			if mtp6Blocks >= 12*time.Hour {
+				// If producing the last 6 block took more than 12h, increase the difficulty
+				// target by 1/4 (which reduces the difficulty by 20%). This ensure the
+				// chain do not get stuck in case we lose hashrate abruptly.
+				nPow := blockchain.CompactToBig(lastNode.Header.Bits)
+				shft := new(big.Int).Rsh(nPow, 2)
+				nPow.Add(nPow, shft)
+
+				// Make sure it doesn't go over limit
+				if nPow.Cmp(b.server.chainParams.PowLimit) > 0 {
+					return blockchain.BigToCompact(b.server.chainParams.PowLimit), nil
+				}
+
+				newTargetBits := blockchain.BigToCompact(nPow)
+				log.Debugf("Emergency difficulty retarget at block height %d", lastNode.Height+1)
+				log.Debugf("Old target %08x (%064x)", lastNode.Header.Bits, oldTarget)
+				log.Debugf("New target %08x (%064x)", newTargetBits, blockchain.CompactToBig(newTargetBits))
+				log.Debugf("Actual mtp time passed %s", mtp6Blocks)
+				return newTargetBits, nil
+			}
 		}
 
 		// For the main network (or any unrecognized networks), simply
