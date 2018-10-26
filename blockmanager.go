@@ -213,10 +213,17 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		return nil, err
 	}
 	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
-	bm.headerList.ResetHeaderState(headerlist.Node{
+
+	// We will initialize the header state with a cache of 1000 headers
+	// more than enough to calculate the difficulty and guard against
+	// a reorg.
+	err = bm.headerList.ResetHeaderState(headerlist.Node{
 		Header: *header,
 		Height: int32(height),
-	})
+	}, s.BlockHeaders)
+	if err != nil {
+		return nil, err
+	}
 	bm.headerTip = height
 	bm.headerTipHash = header.BlockHash()
 

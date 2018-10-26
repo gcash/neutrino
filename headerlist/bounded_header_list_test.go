@@ -62,7 +62,7 @@ func TestBoundedMemoryChainResetHeaderState(t *testing.T) {
 	newNode := Node{
 		Height: 4,
 	}
-	memChain.ResetHeaderState(newNode)
+	memChain.ResetHeaderState(newNode, nil)
 
 	// At this point, the front and back of the chain should be identical.
 	if memChain.Front() != memChain.Back() {

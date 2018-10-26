@@ -1,5 +1,10 @@
 package headerlist
 
+import "github.com/gcash/neutrino/headerfs"
+
+// initialIndexCacheSize is the number of headers to load into memory on startup
+const initialIndexCacheSize = 1000
+
 // BoundedMemoryChain is an implemetnation of the headerlist.Chain interface
 // which has a bounded size. The chain will be stored purely in memory. This is
 // useful for enforcing that only the past N headers are stored in memory, or
@@ -46,15 +51,45 @@ func NewBoundedMemoryChain(maxNodes uint32) *BoundedMemoryChain {
 var _ Chain = (*BoundedMemoryChain)(nil)
 
 // ResetHeaderState resets the state of all nodes. After this method, it will
-// be as if the chain was just newly created.
+// be as if the chain was just newly created. It will load the last 1000 blocks
+// into the index if possible. This is necessary for calculating the difficulty
+// after a few startup.
 //
 // NOTE: Part of the Chain interface.
-func (b *BoundedMemoryChain) ResetHeaderState(n Node) {
+func (b *BoundedMemoryChain) ResetHeaderState(n Node, store headerfs.BlockHeaderStore) error {
 	b.headPtr = -1
 	b.tailPtr = -1
 	b.len = 0
 
-	b.PushBack(n)
+	// If this is the genesis block or the store is nil and we don't want to
+	// initialize a cache, we'll just push just this one node.
+	if n.Height == 0 || store == nil {
+		b.PushBack(n)
+		return nil
+	}
+
+	numHeaders := uint32(initialIndexCacheSize)
+	if uint32(n.Height) < numHeaders {
+		numHeaders = uint32(n.Height)
+	}
+	stopHash := n.Header.BlockHash()
+	headers, startHeight, err := store.FetchHeaderAncestors(numHeaders, &stopHash)
+	if err != nil {
+		return err
+	}
+	var prev *Node
+	height := int32(startHeight)
+	for _, header := range headers {
+		toAdd := Node {
+			prev: prev,
+			Header: header,
+			Height: height,
+		}
+		b.PushBack(toAdd)
+		height++
+		prev = &toAdd
+	}
+	return nil
 }
 
 // Back returns the end of the chain. If the chain is empty, then this return a

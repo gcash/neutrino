@@ -1,6 +1,9 @@
 package headerlist
 
-import "github.com/gcash/bchd/wire"
+import (
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/neutrino/headerfs"
+)
 
 // Chain is an interface that stores a list of Nodes. Each node represents a
 // header in the main chain and also includes a height along with it. This is
@@ -10,7 +13,7 @@ import "github.com/gcash/bchd/wire"
 type Chain interface {
 	// ResetHeaderState resets the state of all nodes. After this method, it will
 	// be as if the chain was just newly created.
-	ResetHeaderState(Node)
+	ResetHeaderState(Node, headerfs.BlockHeaderStore) error
 
 	// Back returns the end of the chain. If the chain is empty, then this
 	// return a pointer to a nil node.
