@@ -741,6 +741,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	return &s, nil
 }
 
+// IsMagneticAnomalyEnabled returns whether or not the magnetic anomaly hardfork
+// is active
+func (s *ChainService) IsMagneticAnomalyEnabled(prevBlock chainhash.Hash) (bool, error) {
+	prevHeader, _, err := s.BlockHeaders.FetchHeader(&prevBlock)
+	if err != nil {
+		return false, err
+	}
+	medianTime, err := s.BlockHeaders.CalcPastMedianTime(prevHeader)
+	if err != nil {
+		return false, err
+	}
+	return medianTime.Unix() >= int64(s.chainParams.MagneticAnomalyActivationTime), nil
+}
+
 // BestSnapshot retrieves the most recent block's height and hash.
 func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
 	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()

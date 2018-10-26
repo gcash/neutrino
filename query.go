@@ -954,6 +954,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					block.SetHeight(int32(height))
 				}
 
+				magneticAnomalyActive, err := s.IsMagneticAnomalyEnabled(block.MsgBlock().Header.PrevBlock)
+				if err != nil {
+					log.Error("Error calculating if magnetic anomaly is active")
+					return
+				}
+
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
@@ -965,6 +971,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					// synchronization
 					s.chainParams.PowLimit,
 					s.timeSource,
+					magneticAnomalyActive,
 				); err != nil {
 					log.Warnf("Invalid block for %s "+
 						"received from %s -- "+
@@ -989,8 +996,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		options...,
 	)
 	if foundBlock == nil {
-		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
-			"network", blockHash)
+		return nil, fmt.Errorf("couldn't retrieve block %s from network", blockHash)
 	}
 
 	// Add block to the cache before returning it.
