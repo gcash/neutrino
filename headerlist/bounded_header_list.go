@@ -80,8 +80,8 @@ func (b *BoundedMemoryChain) ResetHeaderState(n Node, store headerfs.BlockHeader
 	var prev *Node
 	height := int32(startHeight)
 	for _, header := range headers {
-		toAdd := Node {
-			prev: prev,
+		toAdd := Node{
+			prev:   prev,
 			Header: header,
 			Height: height,
 		}

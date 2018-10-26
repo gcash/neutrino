@@ -394,7 +394,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		b.headerList.ResetHeaderState(headerlist.Node{
 			Header: *header,
 			Height: int32(height),
-		})
+		}, b.server.BlockHeaders)
 		b.startSync(peers)
 	}
 }
@@ -2133,7 +2133,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			b.reorgList.ResetHeaderState(headerlist.Node{
 				Header: *backHead,
 				Height: int32(backHeight),
-			})
+			}, b.server.BlockHeaders)
 			totalWork := big.NewInt(0)
 			for j, reorgHeader := range msg.Headers[i:] {
 				err = b.checkHeaderSanity(reorgHeader,
@@ -2229,7 +2229,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			b.headerList.ResetHeaderState(headerlist.Node{
 				Header: *backHead,
 				Height: int32(backHeight),
-			})
+			}, b.server.BlockHeaders)
 			b.headerList.PushBack(headerlist.Node{
 				Header: *blockHeader,
 				Height: int32(backHeight + 1),
@@ -2415,26 +2415,18 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	// We need to calculate the work differential between the first and last
 	// suitable nodes, however we aren't tracking total work in the db.
 	// Fortunately we enough data in memory to calculate it.
-	headerMap := make(map[int32]*headerlist.Node)
 	node0 := lastNode
 	node1 := node0.Prev()
 	node2 := node1.Prev()
-	headerMap[node0.Height] = node0
-	headerMap[node1.Height] = node1
-	headerMap[node2.Height] = node2
 
 	prev := node2
 	for i := 0; i < blockchain.DifficultyAdjustmentWindow-3; i++ {
-		headerMap[prev.Height] = prev
 		prev = prev.Prev()
 	}
 
 	node144 := prev
 	node145 := prev.Prev()
 	node146 := prev.Prev()
-	headerMap[node144.Height] = node144
-	headerMap[node145.Height] = node145
-	headerMap[node146.Height] = node146
 
 	// Find the suitable blocks to use as the first and last nodes for the
 	// purpose of the difficulty calculation. A suitable block is the median
@@ -2449,10 +2441,15 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	}
 
 	// Add up the work done from the first to last suitable blocks.
-	work := big.NewInt(0)
-	for i := suitableFirstNode.Height; i < suitableLastNode.Height; i++ {
-		node := headerMap[i]
-		work = work.Add(work, blockchain.CompactToBig(node.Header.Bits))
+	workSum := blockchain.CalcWork(suitableLastNode.Header.Bits)
+	nextNode := suitableLastNode
+	for {
+		nextNode = nextNode.Prev()
+		work := blockchain.CalcWork(nextNode.Header.Bits)
+		workSum = workSum.Add(work, workSum)
+		if nextNode.Height == suitableFirstNode.Height {
+			break
+		}
 	}
 
 	// In order to avoid difficulty cliffs, we bound the amplitude of the
@@ -2464,7 +2461,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 		duration = 72 * int64(b.server.chainParams.TargetTimePerBlock.Seconds())
 	}
 
-	projectedWork := new(big.Int).Mul(work, big.NewInt(int64(b.server.chainParams.TargetTimePerBlock.Seconds())))
+	projectedWork := new(big.Int).Mul(workSum, big.NewInt(int64(b.server.chainParams.TargetTimePerBlock.Seconds())))
 
 	pw := new(big.Int).Div(projectedWork, big.NewInt(duration))
 
