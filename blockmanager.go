@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"container/list"
 	"fmt"
+	"github.com/go-errors/errors"
 	"math"
 	"math/big"
 	"sync"
@@ -2030,13 +2031,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			err := b.checkHeaderSanity(blockHeader, maxTimestamp,
 				false)
 			if err != nil {
-				log.Warnf("Header doesn't pass sanity check: "+
-					"%s -- disconnecting peer", err)
+				log.Warnf("Header %d doesn't pass sanity check: "+
+					"%s -- disconnecting peer", prevNode.Height + 1, err)
 				hmsg.peer.Disconnect()
 				return
 			}
 
 			node.Height = prevNode.Height + 1
+			node.SetPrev(prevNode)
 			finalHeight = node.Height
 
 			// This header checks out, so we'll add it to our write
@@ -2139,9 +2141,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				err = b.checkHeaderSanity(reorgHeader,
 					maxTimestamp, true)
 				if err != nil {
-					log.Warnf("Header doesn't pass sanity"+
+					log.Warnf("Header %d doesn't pass sanity"+
 						" check: %s -- disconnecting "+
-						"peer", err)
+						"peer", prevNode.Height + 1, err)
 					hmsg.peer.Disconnect()
 					return
 				}
@@ -2360,7 +2362,15 @@ func (b *blockManager) selectDifficultyAdjustmentAlgorithm(height int32) blockch
 
 // getSuitableBlock locates the two parents of passed in block, sorts the three
 // blocks by timestamp and returns the median.
-func (b *blockManager) getSuitableBlock(node0, node1, node2 *headerlist.Node) (*headerlist.Node, error) {
+func (b *blockManager) getSuitableBlock(node0 *headerlist.Node) (*headerlist.Node, error) {
+	node1 := node0.Prev()
+	if node1 == nil {
+		return nil, errors.New("previous node is nil")
+	}
+	node2 := node1.Prev()
+	if node2 == nil {
+		return nil, errors.New("previous node is nil")
+	}
 	blocks := []*headerlist.Node{node2, node1, node0}
 	if blocks[0].Header.Timestamp.Unix() > blocks[2].Header.Timestamp.Unix() {
 		blocks[0], blocks[2] = blocks[2], blocks[0]
@@ -2412,30 +2422,20 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 		}
 	}
 
-	// We need to calculate the work differential between the first and last
-	// suitable nodes, however we aren't tracking total work in the db.
-	// Fortunately we enough data in memory to calculate it.
-	node0 := lastNode
-	node1 := node0.Prev()
-	node2 := node1.Prev()
-
-	prev := node2
-	for i := 0; i < blockchain.DifficultyAdjustmentWindow-3; i++ {
-		prev = prev.Prev()
-	}
-
-	node144 := prev
-	node145 := prev.Prev()
-	node146 := prev.Prev()
-
 	// Find the suitable blocks to use as the first and last nodes for the
 	// purpose of the difficulty calculation. A suitable block is the median
 	// timestamp out of the three prior.
-	suitableLastNode, err := b.getSuitableBlock(node0, node1, node2)
+	suitableLastNode, err := b.getSuitableBlock(lastNode)
 	if err != nil {
 		return 0, err
 	}
-	suitableFirstNode, err := b.getSuitableBlock(node144, node145, node146)
+
+	prev := lastNode
+	for i:=0; i<blockchain.DifficultyAdjustmentWindow; i++ {
+		prev = prev.Prev()
+	}
+
+	suitableFirstNode, err := b.getSuitableBlock(prev)
 	if err != nil {
 		return 0, err
 	}
@@ -2531,18 +2531,18 @@ func (b *blockManager) calcLegacyRequiredDifficulty(newBlockTime time.Time,
 			}
 			// If producing the last 6 block took less than 12h, we keep the same
 			// difficulty.
-			firstNode, err := b.server.BlockHeaders.FetchHeaderByHeight(
-				uint32(lastNode.Height - 6),
-			)
-			if firstNode == nil {
-				return 0, err
+			firstNode := lastNode
+			for i:=0; i<6; i++ {
+				firstNode = firstNode.Prev()
 			}
-			lastHeader := lastNode.Header
-			medianTimeLast, err := b.server.BlockHeaders.CalcPastMedianTime(&lastHeader)
+
+			medianTimeLast, err := b.server.BlockHeaders.CalcPastMedianTime(
+				hList.FetchHeaderAncestors(lastNode, headerfs.MedianTimeBlocks))
 			if err != nil {
 				return 0, err
 			}
-			medianTimeFirst, err := b.server.BlockHeaders.CalcPastMedianTime(firstNode)
+			medianTimeFirst, err := b.server.BlockHeaders.CalcPastMedianTime(
+				hList.FetchHeaderAncestors(firstNode, headerfs.MedianTimeBlocks))
 			if err != nil {
 				return 0, err
 			}

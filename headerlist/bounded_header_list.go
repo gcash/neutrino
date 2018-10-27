@@ -1,6 +1,9 @@
 package headerlist
 
-import "github.com/gcash/neutrino/headerfs"
+import (
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/neutrino/headerfs"
+)
 
 // initialIndexCacheSize is the number of headers to load into memory on startup
 const initialIndexCacheSize = 1000
@@ -169,4 +172,13 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 	}
 
 	return &b.chain[chainIndex]
+}
+
+func (b *BoundedMemoryChain) FetchHeaderAncestors(n *Node, numNodes int) []*wire.BlockHeader {
+	var headers []*wire.BlockHeader
+	for i:=0; i<numNodes; i++ {
+		headers = append(headers, &n.Header)
+		n = n.Prev()
+	}
+	return headers
 }

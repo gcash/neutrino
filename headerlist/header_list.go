@@ -26,6 +26,9 @@ type Chain interface {
 	// PushBack will push a new entry to the end of the chain. The entry
 	// added to the chain is also returned in place.
 	PushBack(Node) *Node
+
+	// Fetch the given number of ancestor headers for the given node
+	FetchHeaderAncestors(*Node, int) []*wire.BlockHeader
 }
 
 // Node is a node within the Chain. Each node stores a header as well as a
@@ -46,4 +49,9 @@ type Node struct {
 // nil.
 func (n *Node) Prev() *Node {
 	return n.prev
+}
+
+// SetPrev sets the previous node for this node
+func (n *Node) SetPrev(prev *Node) {
+	n.prev = prev
 }

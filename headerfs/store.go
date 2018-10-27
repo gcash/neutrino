@@ -68,13 +68,13 @@ type BlockHeaderStore interface {
 	// prior to, and including, the block node.
 	//
 	// This function is safe for concurrent access.
-	CalcPastMedianTime(header *wire.BlockHeader) (time.Time, error)
+	CalcPastMedianTime([]*wire.BlockHeader) (time.Time, error)
 }
 
 const (
-	// medianTimeBlocks is the number of previous blocks which should be
+	// MedianTimeBlocks is the number of previous blocks which should be
 	// used to calculate the median time used to validate block timestamps.
-	medianTimeBlocks = 11
+	MedianTimeBlocks = 11
 )
 
 // headerBufPool is a pool of bytes.Buffer that will be re-used by the various
@@ -485,26 +485,15 @@ func (h *blockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error)
 // prior to, and including, the block node.
 //
 // This function is safe for concurrent access.
-func (h *blockHeaderStore) CalcPastMedianTime(header *wire.BlockHeader) (time.Time, error) {
-	stopHash := header.BlockHash()
-	headers, _, err := h.FetchHeaderAncestors(medianTimeBlocks, &stopHash)
-	if err != nil {
-		return time.Time{}, err
-	}
+func (h *blockHeaderStore) CalcPastMedianTime(headers []*wire.BlockHeader) (time.Time, error) {
 
 	// Create a slice of the previous few block timestamps used to calculate
 	// the median per the number defined by the constant medianTimeBlocks.
-	timestamps := make([]int64, medianTimeBlocks)
-	numNodes := 0
-
+	var timestamps []int64
 	for _, header := range headers {
 		timestamps = append(timestamps, header.Timestamp.Unix())
 	}
 
-	// Prune the slice to the actual number of available timestamps which
-	// will be fewer than desired near the beginning of the block chain
-	// and sort them.
-	timestamps = timestamps[:numNodes]
 	sort.Sort(timeSorter(timestamps))
 
 	// NOTE: The consensus rules incorrectly calculate the median for even
@@ -519,7 +508,7 @@ func (h *blockHeaderStore) CalcPastMedianTime(header *wire.BlockHeader) (time.Ti
 	// This code follows suit to ensure the same rules are used, however, be
 	// aware that should the medianTimeBlocks constant ever be changed to an
 	// even number, this code will be wrong.
-	medianTimestamp := timestamps[numNodes/2]
+	medianTimestamp := timestamps[len(headers)/2]
 	return time.Unix(medianTimestamp, 0), nil
 }
 
