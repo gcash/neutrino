@@ -57,7 +57,7 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:7ad1ab7f2cf49a7046cd09a343085cf8ce382a2f5c52661fa0b13357f3f9285b"
+  digest = "1:b34e848c74c1c0cc54c234e21ddc337183b1c10ac50e9a551b866d539540765d"
   name = "github.com/gcash/bchd"
   packages = [
     "addrmgr",
@@ -76,7 +76,7 @@
     "wire",
   ]
   pruneopts = "UT"
-  revision = "b10168fcf9eff0c869339898bce66833d7c28a07"
+  revision = "2b17a6c916017b51ce105a33fc406eb960e04ab3"
 
 [[projects]]
   branch = "master"
