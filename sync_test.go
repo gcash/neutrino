@@ -977,7 +977,6 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 	if lastErr != nil {
 		t.Fatal(lastErr)
 	}
-	return
 }
 
 func TestNeutrinoSync(t *testing.T) {

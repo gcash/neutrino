@@ -1031,7 +1031,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	if banEnd, ok := state.banned[host]; ok {
 		if time.Now().Before(banEnd) {
 			log.Debugf("Peer %s is banned for another %v - disconnecting",
-				host, banEnd.Sub(time.Now()))
+				host, time.Until(banEnd))
 			sp.Disconnect()
 			return false
 		}

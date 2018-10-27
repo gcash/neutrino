@@ -805,12 +805,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		// Each checkpoint is spaced wire.CFCheckptInterval after the
 		// prior one, so we'll fetch headers in batches using the
 		// checkpoints as a guide.
-		startHeightRange := uint32(
-			currentInterval*wire.CFCheckptInterval,
-		) + 1
-		endHeightRange := uint32(
-			(currentInterval + 1) * wire.CFCheckptInterval,
-		)
+		startHeightRange := currentInterval*wire.CFCheckptInterval + 1
+		endHeightRange := (currentInterval + 1) * wire.CFCheckptInterval
 
 		log.Tracef("Checkpointed cfheaders request start_range=%v, "+
 			"end_range=%v", startHeightRange, endHeightRange)
@@ -835,7 +831,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		// Once we have the stop hash, we can construct the query
 		// message itself.
 		queryMsg := wire.NewMsgGetCFHeaders(
-			fType, uint32(startHeightRange), &stopHash,
+			fType, startHeightRange, &stopHash,
 		)
 
 		// We'll mark that the ith interval is queried by this message,

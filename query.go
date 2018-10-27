@@ -1003,7 +1003,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Add block to the cache before returning it.
-	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}

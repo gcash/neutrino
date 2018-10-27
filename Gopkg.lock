@@ -119,6 +119,14 @@
   revision = "1c8ec37b54208c2b2b2d2767caf1c861a98e5c42"
 
 [[projects]]
+  digest = "1:aacef5f5e45685f2aeda5534d0a750dee6859de7e9088cdd06192787bb01ae6d"
+  name = "github.com/go-errors/errors"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "a6af135bd4e28680facf08a3d206b454abc877a4"
+  version = "v1.0.1"
+
+[[projects]]
   branch = "master"
   digest = "1:a6303215c6d4578f058f8a10b14fa675c4f9bec7630d171f49bb489e877629eb"
   name = "github.com/kkdai/bstream"
@@ -167,6 +175,7 @@
     "github.com/gcash/bchwallet/wallet/txauthor",
     "github.com/gcash/bchwallet/walletdb",
     "github.com/gcash/bchwallet/walletdb/bdb",
+    "github.com/go-errors/errors",
   ]
   solver-name = "gps-cdcl"
   solver-version = 1

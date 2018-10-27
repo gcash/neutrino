@@ -174,6 +174,7 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 	return &b.chain[chainIndex]
 }
 
+// FetchHeaderAncestors will return the requested number of ancestors for the given node
 func (b *BoundedMemoryChain) FetchHeaderAncestors(n *Node, numNodes int) []*wire.BlockHeader {
 	var headers []*wire.BlockHeader
 	for i := 0; i < numNodes; i++ {
