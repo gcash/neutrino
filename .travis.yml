@@ -1,26 +1,24 @@
 language: go
 go:
-  - "1.9.4"
-  - "1.10"
+- "1.9.7"
+- "1.10.4"
+- "1.11.1"
+- "tip"
+
 sudo: false
+
+before_install:
+- >-
+  curl -L -s https://github.com/golang/dep/releases/download/v0.5.0/dep-linux-amd64
+  -o $GOPATH/bin/dep
+- chmod +x $GOPATH/bin/dep
+- go get gopkg.in/alecthomas/gometalinter.v2
+- gometalinter.v2 --install
+
 install:
-  - GLIDE_TAG=v0.12.3
-  - GLIDE_DOWNLOAD="https://github.com/Masterminds/glide/releases/download/$GLIDE_TAG/glide-$GLIDE_TAG-linux-amd64.tar.gz"
-  - curl -L $GLIDE_DOWNLOAD | tar -xvz
-  - export PATH=$PATH:$PWD/linux-amd64/
-  - mkdir -p $GOPATH/src/github.com/btcsuite/
-  - pushd $GOPATH/src/github.com/btcsuite/
-  - git clone https://github.com/btcsuite/btcd
-  - pushd btcd
-  - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
-  - glide install
-  - go install . ./cmd/...
-  - popd
-  - popd
-env:
-  matrix:
-    - RACE=false
-    - RACE=true
+- dep ensure
+- go install . ./cmd/...
+
 script:
-  - export PATH=$PATH:$HOME/gopath/bin
-  - ./gotest.sh
+- export PATH=$PATH:$HOME/gopath/bin
+- ./goclean.sh
