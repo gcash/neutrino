@@ -176,7 +176,7 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 
 func (b *BoundedMemoryChain) FetchHeaderAncestors(n *Node, numNodes int) []*wire.BlockHeader {
 	var headers []*wire.BlockHeader
-	for i:=0; i<numNodes; i++ {
+	for i := 0; i < numNodes; i++ {
 		headers = append(headers, &n.Header)
 		n = n.Prev()
 	}

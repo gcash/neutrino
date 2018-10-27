@@ -2032,7 +2032,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				false)
 			if err != nil {
 				log.Warnf("Header %d doesn't pass sanity check: "+
-					"%s -- disconnecting peer", prevNode.Height + 1, err)
+					"%s -- disconnecting peer", prevNode.Height+1, err)
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -2143,7 +2143,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				if err != nil {
 					log.Warnf("Header %d doesn't pass sanity"+
 						" check: %s -- disconnecting "+
-						"peer", prevNode.Height + 1, err)
+						"peer", prevNode.Height+1, err)
 					hmsg.peer.Disconnect()
 					return
 				}
@@ -2431,7 +2431,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	}
 
 	prev := lastNode
-	for i:=0; i<blockchain.DifficultyAdjustmentWindow; i++ {
+	for i := 0; i < blockchain.DifficultyAdjustmentWindow; i++ {
 		prev = prev.Prev()
 	}
 
@@ -2447,7 +2447,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 		nextNode = nextNode.Prev()
 		work := blockchain.CalcWork(nextNode.Header.Bits)
 		workSum = workSum.Add(work, workSum)
-		if nextNode.Height == suitableFirstNode.Height {
+		if nextNode.Height == suitableFirstNode.Height+1 {
 			break
 		}
 	}
@@ -2532,7 +2532,7 @@ func (b *blockManager) calcLegacyRequiredDifficulty(newBlockTime time.Time,
 			// If producing the last 6 block took less than 12h, we keep the same
 			// difficulty.
 			firstNode := lastNode
-			for i:=0; i<6; i++ {
+			for i := 0; i < 6; i++ {
 				firstNode = firstNode.Prev()
 			}
 
