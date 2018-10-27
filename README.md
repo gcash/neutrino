@@ -2,9 +2,9 @@
 
 [![Build Status](https://travis-ci.org/gcash/neutrino.svg?branch=master)](https://travis-ci.org/gcash/neutrino)
 [![Godoc](https://godoc.org/github.com/gcash/neutrino?status.svg)](https://godoc.org/github.com/gcash/neutrino)
-[![Coverage Status](https://coveralls.io/repos/github/gcash/neutrino/badge.svg?branch=master)](https://coveralls.io/github/gcash/neutrino?branch=master)
 
-Neutrino is an **experimental** Bitcoin light client written in Go and designed with mobile Lightning Network clients in mind. It uses a [new proposal](https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2017-June/014474.html) for compact block filters to minimize bandwidth and storage use on the client side, while attempting to preserve privacy and minimize processor load on full nodes serving light clients.
+Neutrino is an **experimental** Bitcoin light client written in Go. It was developed by Roasbeef and other BTC contributors as part of the broader Lightning Network project.
+This repo is a port of neutrino to the Bitcoin Cash network as part of the bchd project. It uses a [new proposal](https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2017-June/014474.html) for compact block filters to minimize bandwidth and storage use on the client side, while attempting to preserve privacy and minimize processor load on full nodes serving light clients.
 
 ## Mechanism of operation
 The light client synchronizes only block headers and a chain of compact block filter headers specifying the correct filters for each block. Filters are loaded lazily and stored in the database upon request; blocks are loaded lazily and not saved. There are multiple [known major issues](https://github.com/gcash/neutrino/issues) with the client, so it is **not recommended** to use it with real money at this point.

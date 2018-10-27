@@ -42,7 +42,7 @@
   name = "github.com/gcash/bchutil"
 
 [[constraint]]
-  branch = "neutrino"
+  branch = "master"
   name = "github.com/gcash/bchwallet"
 
 [prune]
