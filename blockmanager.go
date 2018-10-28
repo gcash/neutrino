@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"container/list"
 	"fmt"
+	"github.com/gcash/bchutil/bloom"
 	"github.com/go-errors/errors"
 	"math"
 	"math/big"
@@ -87,6 +88,14 @@ type txMsg struct {
 	tx   *bchutil.Tx
 	peer *ServerPeer
 }
+
+// disableTxDownloadMsg tells the peer handler to send a match none
+// bloom filter to all peers
+type disableTxDownloadMsg struct{}
+
+// enableTxDownloadMsg tells the peer handler to send a match all
+//// bloom filter to all peers
+type enableTxDownloadMsg struct{}
 
 // blockManager provides a concurrency safe block manager for handling all
 // incoming blocks.
@@ -175,6 +184,8 @@ type blockManager struct {
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
+
+	requestedTxns map[chainhash.Hash]struct{}
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -203,6 +214,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		requestedTxns:       make(map[chainhash.Hash]struct{}),
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait
@@ -1632,11 +1644,20 @@ out:
 			case *invMsg:
 				b.handleInvMsg(msg)
 
+			case *txMsg:
+				b.handleTxMsg(msg)
+
 			case *headersMsg:
 				b.handleHeadersMsg(msg)
 
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
+
+			case *disableTxDownloadMsg:
+				b.handleDisableTxDownloadMsg(candidatePeers)
+
+			case *enableTxDownloadMsg:
+				b.handleEnableTxDownloadMsg(candidatePeers)
 
 			default:
 				log.Warnf("Invalid message type in block "+
@@ -1912,13 +1933,48 @@ func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *ServerPeer) {
 	}
 }
 
+/// QueueTx adds the passed transaction message and peer to the block handling
+// queue. Responds to the done channel argument after the tx message is
+// processed.
+func (b *blockManager) QueueTx(tx *bchutil.Tx, sp *ServerPeer) {
+	// No channel handling here because peers do not need to block on inv
+	// messages.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
+	select {
+	case b.peerChan <- &txMsg{tx: tx, peer: sp}:
+	case <-b.quit:
+		return
+	}
+}
+
 // handleInvMsg handles inv messages from all peers.
 // We examine the inventory advertised by the remote peer and act accordingly.
 func (b *blockManager) handleInvMsg(imsg *invMsg) {
+	invVects := imsg.inv.InvList
+	if b.BlockHeadersSynced() {
+		gdmsg := wire.NewMsgGetData()
+		for _, iv := range invVects {
+			if iv.Type == wire.InvTypeTx {
+				if b.server.mempool.HaveTransaction(&iv.Hash) {
+					continue
+				}
+				if _, exists := b.requestedTxns[iv.Hash]; !exists {
+					b.requestedTxns[iv.Hash] = struct{}{}
+					gdmsg.AddInvVect(iv)
+				}
+			}
+		}
+		if len(gdmsg.InvList) > 0 {
+			imsg.peer.QueueMessage(gdmsg, nil)
+		}
+	}
+
 	// Attempt to find the final block in the inventory list.  There may
 	// not be one.
 	lastBlock := -1
-	invVects := imsg.inv.InvList
 	for i := len(invVects) - 1; i >= 0; i-- {
 		if invVects[i].Type == wire.InvTypeBlock {
 			lastBlock = i
@@ -1993,6 +2049,41 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 			}
 			b.lastRequested = invVects[lastBlock].Hash
 		}
+	}
+}
+
+// handleTxMsg handles transaction messages from all peers.
+func (b *blockManager) handleTxMsg(tmsg *txMsg) {
+	txHash := tmsg.tx.Hash()
+	if _, exists := b.requestedTxns[*txHash]; !exists {
+		log.Warnf("Peer %s sent us a transaction we didn't request", tmsg.peer.Addr())
+		return
+	}
+	b.server.mempool.AddTransaction(tmsg.tx)
+	delete(b.requestedTxns, *txHash)
+}
+
+// handleDisableTxDownloadMsg sends a match none bloom filter to all peers
+func (b *blockManager) handleDisableTxDownloadMsg(peers *list.List) {
+	for e := peers.Front(); e != nil; e = e.Next() {
+		sp, ok := e.Value.(*ServerPeer)
+		if !ok {
+			log.Error("handleDisableTxDownloadMsg error asserting type ServerPeer")
+		}
+		filter := bloom.NewFilter(0, 0, 0, wire.BloomUpdateNone)
+		sp.QueueMessage(filter.MsgFilterLoad(), nil)
+	}
+}
+
+// handleEnableTxDownloadMsg sends a match all bloom filter to all peers
+func (b *blockManager) handleEnableTxDownloadMsg(peers *list.List) {
+	for e := peers.Front(); e != nil; e = e.Next() {
+		sp, ok := e.Value.(*ServerPeer)
+		if !ok {
+			log.Error("handleEnableTxDownloadMsg error asserting type ServerPeer")
+		}
+		filter := bloom.NewFilter(0, 0, 1, wire.BloomUpdateNone)
+		sp.QueueMessage(filter.MsgFilterLoad(), nil)
 	}
 }
 
@@ -2353,6 +2444,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	b.headerTipHash = *finalHash
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
+
+	// Clear the mempool to free up memory. This may mean we might receive
+	// transactions we've previously downloaded but this is rather unlikely.
+	b.server.mempool.Clear()
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
