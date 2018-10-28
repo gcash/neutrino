@@ -190,21 +190,24 @@ const (
 // and provide some presets (including the ones below) prior to factoring out
 // the query API into its own package?
 
-// queryBatch is a helper function that sends a batch of queries to the entire
-// pool of peers, attempting to get them all answered unless the quit channel
-// is closed. It continues to update its view of the connected peers in case
-// peers connect or disconnect during the query. The package-level QueryTimeout
-// parameter, overridable by the Timeout option, determines how long a peer
-// waits for a query before moving onto the next one. The NumRetries option
-// and the QueryNumRetries package-level variable are ignored; the query
-// continues until it either completes or the passed quit channel is closed.
-// For memory efficiency, we attempt to get responses as close to ordered as
-// we can, so that the caller can cache as few responses as possible before
-// committing to storage.
+// queryChainServiceBatch is a helper function that sends a batch of queries to
+// the entire pool of peers of the given ChainService, attempting to get them
+// all answered unless the quit channel is closed. It continues to update its
+// view of the connected peers in case peers connect or disconnect during the
+// query. The package-level QueryTimeout parameter, overridable by the Timeout
+// option, determines how long a peer waits for a query before moving onto the
+// next one. The NumRetries option and the QueryNumRetries package-level
+// variable are ignored; the query continues until it either completes or the
+// passed quit channel is closed.  For memory efficiency, we attempt to get
+// responses as close to ordered as we can, so that the caller can cache as few
+// responses as possible before committing to storage.
 //
 // TODO(aakselrod): support for more than one in-flight query per peer to
 // reduce effects of latency.
-func (s *ChainService) queryBatch(
+func queryChainServiceBatch(
+	// s is the ChainService to use.
+	s *ChainService,
+
 	// queryMsgs is a slice of queries for which the caller wants responses.
 	queryMsgs []wire.Message,
 
@@ -954,6 +957,15 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					block.SetHeight(int32(height))
 				}
 
+				//TODO: we're going to skip the magnetic anomaly sanity check
+				// for now as 1) most SPV wallets don't do this level of sanity checking
+				// and any checking we do here is just gravy.
+				//
+				// and 2) it's a major PIA to calculate median time past from here given the
+				// data structures.
+				// Once the fork actives we can just check against the height which will be
+				// much easier.
+
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
@@ -991,12 +1003,11 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		options...,
 	)
 	if foundBlock == nil {
-		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
-			"network", blockHash)
+		return nil, fmt.Errorf("couldn't retrieve block %s from network", blockHash)
 	}
 
 	// Add block to the cache before returning it.
-	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}

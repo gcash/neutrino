@@ -200,7 +200,9 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		// If the end block hash is non-nil, then we'll query the
 		// database to find out the stop height.
 		if (ro.endBlock.Hash != chainhash.Hash{}) {
-			_, height, err := s.BlockHeaders.FetchHeader(&ro.endBlock.Hash)
+			_, height, err := s.BlockHeaders.FetchHeader(
+				&ro.endBlock.Hash,
+			)
 			if err != nil {
 				ro.endBlock.Hash = chainhash.Hash{}
 			} else {
@@ -238,8 +240,11 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		curHeader wire.BlockHeader
 		curStamp  waddrmgr.BlockStamp
 	)
+
+	// If no start block is specified, start the scan from our current best
+	// block.
 	if ro.startBlock == nil {
-		bs, err := s.BestSnapshot()
+		bs, err := s.BestBlock()
 		if err != nil {
 			return err
 		}
@@ -276,9 +281,9 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		}
 	}
 
-	s.blockManager.newFilterHeadersMtx.Lock()
+	s.blockManager.newFilterHeadersMtx.RLock()
 	filterHeaderHeight := s.blockManager.filterHeaderTip
-	s.blockManager.newFilterHeadersMtx.Unlock()
+	s.blockManager.newFilterHeadersMtx.RUnlock()
 
 	log.Debugf("Waiting for filter headers (height=%v) to catch up the "+
 		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
@@ -534,6 +539,9 @@ rescanLoop:
 				// trying to fetch from are in the progress of
 				// a re-org.
 				if blockFilter == nil {
+					// TODO(halseth): this is racy, as
+					// blocks can come in before we
+					// refetch.
 					resetBlockReFetchTimer(
 						header, curStamp.Height,
 					)
@@ -602,7 +610,9 @@ rescanLoop:
 			for {
 				select {
 				case update := <-ro.update:
-					_, err := ro.updateFilter(update, &curStamp, &curHeader)
+					_, err := ro.updateFilter(
+						update, &curStamp, &curHeader,
+					)
 					if err != nil {
 						return err
 					}
@@ -612,17 +622,17 @@ rescanLoop:
 				}
 			}
 
+			bestBlock, err := s.BestBlock()
+			if err != nil {
+				return err
+			}
+
 			// Since we're not current, we try to manually advance
-			// the block. We are only interested in blocks that we
-			// already have both filter headers for. If we fail to
-			// find the next filter header, but have the filter
-			// header for this height, then we mark ourselves as
-			// current and follow notifications.
-			nextHeight := uint32(curStamp.Height + 1)
-			haveNextFilter := s.hasFilterHeadersByHeight(
-				nextHeight,
-			)
-			if !haveNextFilter {
+			// the block. If the next height is above the best
+			// height known to the chain service, then we mark
+			// ourselves as current and follow notifications.
+			nextHeight := curStamp.Height + 1
+			if nextHeight > bestBlock.Height {
 				log.Debugf("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
 					curStamp.Height, curStamp.Hash)
@@ -654,12 +664,12 @@ rescanLoop:
 				continue rescanLoop
 			}
 
-			// If we have the filter for both this height and the
-			// next, then we'll fetch the next block and send a
+			// If the next height is known to the chain service,
+			// then we'll fetch the next block and send a
 			// notification, maybe also scanning the filters for
 			// the block.
 			header, err := s.BlockHeaders.FetchHeaderByHeight(
-				nextHeight,
+				uint32(nextHeight),
 			)
 			if err != nil {
 				return err
@@ -672,7 +682,7 @@ rescanLoop:
 			if !scanning {
 				scanning = ro.startTime.Before(curHeader.Timestamp)
 			}
-			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning)
+			err = s.notifyBlock(ro, curHeader, curStamp, scanning)
 			if err != nil {
 				return err
 			}
@@ -682,7 +692,7 @@ rescanLoop:
 
 // notifyBlock calls appropriate listeners based on the block filter.
 func (s *ChainService) notifyBlock(ro *rescanOptions,
-	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
+	curHeader wire.BlockHeader, curStamp waddrmgr.BlockStamp,
 	scanning bool) error {
 
 	// Find relevant transactions based on watch list. If scanning is
@@ -698,7 +708,7 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 		}
 
 		if matched {
-			relevantTxs, err = s.extractBlockMatches(ro, curStamp)
+			relevantTxs, err = s.extractBlockMatches(ro, &curStamp)
 			if err != nil {
 				return err
 			}
@@ -706,7 +716,7 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	}
 
 	if ro.ntfn.OnFilteredBlockConnected != nil {
-		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
+		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, &curHeader,
 			relevantTxs)
 	}
 
