@@ -10,11 +10,8 @@ import (
 
 // appendRaw appends a new raw header to the end of the flat file.
 func (h *headerStore) appendRaw(header []byte) error {
-	if _, err := h.file.Write(header); err != nil {
-		return err
-	}
-
-	return nil
+	_, err := h.file.Write(header)
+	return err
 }
 
 // readRaw reads a raw header from disk from a particular seek distance. The
@@ -122,11 +119,8 @@ func (h *blockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
 	headerReader := bytes.NewReader(rawHeader)
 
 	// Finally, decode the raw bytes into a proper bitcoin header.
-	if err := header.Deserialize(headerReader); err != nil {
-		return header, err
-	}
-
-	return header, nil
+	err = header.Deserialize(headerReader)
+	return header, err
 }
 
 // readHeader reads a single filter header at the specified height from the
