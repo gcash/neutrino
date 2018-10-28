@@ -8,13 +8,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/gcash/neutrino/cache"
 	"github.com/gcash/neutrino/filterdb"
 )
@@ -957,6 +957,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
+				// TODO: Pass in real magnetic anomaly value.
 				if err := blockchain.CheckBlockSanity(
 					block,
 					// We don't need to check PoW because
@@ -965,6 +966,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					// synchronization
 					s.chainParams.PowLimit,
 					s.timeSource,
+					false,
 				); err != nil {
 					log.Warnf("Invalid block for %s "+
 						"received from %s -- "+
