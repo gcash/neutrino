@@ -120,7 +120,7 @@ func (h *blockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
 
 	// Finally, decode the raw bytes into a proper bitcoin header.
 	err = header.Deserialize(headerReader)
-	return header, nil
+	return header, err
 }
 
 // readHeader reads a single filter header at the specified height from the
