@@ -52,7 +52,7 @@ var (
 
 	// RequiredServices describes the services that are required to be
 	// supported by outbound peers.
-	RequiredServices = wire.SFNodeNetwork | wire.SFNodeCF
+	RequiredServices = wire.SFNodeNetwork | wire.SFNodeCF | wire.SFNodeBloom
 
 	// BanThreshold is the maximum ban score before a peer is banned.
 	BanThreshold = uint32(100)
