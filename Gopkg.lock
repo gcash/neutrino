@@ -11,31 +11,6 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:401d088d63d37e8da99e1cf7e917a465436a41a143ef16a0a8013873745a2ddd"
-  name = "github.com/btcsuite/btcd"
-  packages = [
-    "btcec",
-    "chaincfg",
-    "chaincfg/chainhash",
-    "wire",
-  ]
-  pruneopts = "UT"
-  revision = "67e573d211ace594f1366b4ce9d39726c4b19bd0"
-
-[[projects]]
-  branch = "master"
-  digest = "1:d0a31b77988b04afbfa2c5ee38567a7a35d5a95de2266a644a7bc8d5c898e68d"
-  name = "github.com/btcsuite/btcutil"
-  packages = [
-    ".",
-    "base58",
-    "bech32",
-  ]
-  pruneopts = "UT"
-  revision = "ab6388e0c60ae4834a1f57511e20c17b5f78be4b"
-
-[[projects]]
-  branch = "master"
   digest = "1:1e6b2f7aa98b082c30a1303c29a702c369b2ec6d86b74a599bc8bbe2333db299"
   name = "github.com/btcsuite/go-socks"
   packages = ["socks"]
@@ -82,7 +57,7 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:b34e848c74c1c0cc54c234e21ddc337183b1c10ac50e9a551b866d539540765d"
+  digest = "1:dbf013c28e15e97c4e0bb6ff0397e9125027b779ee1b906f862ad57a12167309"
   name = "github.com/gcash/bchd"
   packages = [
     "addrmgr",
@@ -101,7 +76,7 @@
     "wire",
   ]
   pruneopts = "UT"
-  revision = "2b17a6c916017b51ce105a33fc406eb960e04ab3"
+  revision = "a75a80a1115a9925d3d2d91c7804eb8a2a3c5c54"
 
 [[projects]]
   branch = "master"
@@ -142,7 +117,7 @@
     "walletdb/bdb",
   ]
   pruneopts = "UT"
-  revision = "1c8ec37b54208c2b2b2d2767caf1c861a98e5c42"
+  revision = "ae33412aff486fc7b1e70e5b9610f8b870882bee"
 
 [[projects]]
   digest = "1:aacef5f5e45685f2aeda5534d0a750dee6859de7e9088cdd06192787bb01ae6d"
@@ -180,7 +155,6 @@
   analyzer-name = "dep"
   analyzer-version = 1
   input-imports = [
-    "github.com/btcsuite/btcutil",
     "github.com/davecgh/go-spew/spew",
     "github.com/gcash/bchd/addrmgr",
     "github.com/gcash/bchd/bchec",
