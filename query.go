@@ -957,15 +957,6 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					block.SetHeight(int32(height))
 				}
 
-				//TODO: we're going to skip the magnetic anomaly sanity check
-				// for now as 1) most SPV wallets don't do this level of sanity checking
-				// and any checking we do here is just gravy.
-				//
-				// and 2) it's a major PIA to calculate median time past from here given the
-				// data structures.
-				// Once the fork actives we can just check against the height which will be
-				// much easier.
-
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
@@ -977,7 +968,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					// synchronization
 					s.chainParams.PowLimit,
 					s.timeSource,
-					false,
+					int32(height) > s.chainParams.MagneticAnonomalyForkHeight,
 				); err != nil {
 					log.Warnf("Invalid block for %s "+
 						"received from %s -- "+
