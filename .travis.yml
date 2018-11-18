@@ -15,9 +15,8 @@ before_install:
 - go get gopkg.in/alecthomas/gometalinter.v2
 - gometalinter.v2 --install
 - go get github.com/gcash/bchd
-
-install:
-- dep ensure
+- go get github.com/gcash/neutrino
+- dep init
 
 script:
 - export PATH=$PATH:$HOME/gopath/bin
