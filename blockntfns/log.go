@@ -1,13 +1,7 @@
-package neutrino
+package blockntfns
 
 import (
-	"github.com/gcash/bchd/addrmgr"
-	"github.com/gcash/bchd/blockchain"
-	"github.com/gcash/bchd/peer"
-	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchlog"
-
-	"github.com/gcash/neutrino/blockntfns"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -23,33 +17,29 @@ func init() {
 // DisableLog disables all library log output.  Logging output is disabled
 // by default until either UseLogger or SetLogWriter are called.
 func DisableLog() {
-	log = bchlog.Disabled
+	UseLogger(bchlog.Disabled)
 }
 
 // UseLogger uses a specified Logger to output package logging info.
 // This should be used in preference to SetLogWriter if the caller is also
-// using bchlog.
+// using btclog.
 func UseLogger(logger bchlog.Logger) {
 	log = logger
-	blockchain.UseLogger(logger)
-	txscript.UseLogger(logger)
-	peer.UseLogger(logger)
-	addrmgr.UseLogger(logger)
-	blockntfns.UseLogger(logger)
 }
 
-// logClosure is used to provide a closure over expensive logging operations so
-// don't have to be performed when the logging level doesn't warrant it.
+// LogClosure is a closure that can be printed with %v to be used to
+// generate expensive-to-create data for a detailed log level and avoid doing
+// the work if the data isn't printed.
 type logClosure func() string
 
-// String invokes the underlying function and returns the result.
+// String invokes the log closure and returns the results string.
 func (c logClosure) String() string {
 	return c()
 }
 
-// newLogClosure returns a new closure over a function that returns a string
-// which itself provides a Stringer interface so that it can be used with the
-// logging system.
+// newLogClosure returns a new closure over the passed function which allows
+// it to be used as a parameter in a logging function that is only invoked when
+// the logging level is such that the message will actually be logged.
 func newLogClosure(c func() string) logClosure {
 	return logClosure(c)
 }
