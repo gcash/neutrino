@@ -23,6 +23,7 @@ import (
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
+	"github.com/gcash/neutrino/blockntfns"
 	"github.com/gcash/neutrino/cache/lru"
 	"github.com/gcash/neutrino/filterdb"
 	"github.com/gcash/neutrino/headerfs"
@@ -546,34 +547,25 @@ type ChainService struct {
 	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
 		wire.Message) bool, <-chan struct{}, ...QueryOption)
 
-	chainParams       chaincfg.Params
-	addrManager       *addrmgr.AddrManager
-	connManager       *connmgr.ConnManager
-	blockManager      *blockManager
-	newPeers          chan *ServerPeer
-	donePeers         chan *ServerPeer
-	banPeers          chan *ServerPeer
-	query             chan interface{}
-	firstPeerConnect  chan struct{}
-	peerHeightsUpdate chan updatePeerHeightsMsg
-	wg                sync.WaitGroup
-	quit              chan struct{}
-	timeSource        blockchain.MedianTimeSource
-	services          wire.ServiceFlag
-	blockSubscribers  map[*blockSubscription]struct{}
-	mtxSubscribers    sync.RWMutex
-	utxoScanner       *UtxoScanner
+	chainParams          chaincfg.Params
+	addrManager          *addrmgr.AddrManager
+	connManager          *connmgr.ConnManager
+	blockManager         *blockManager
+	blockSubscriptionMgr *blockntfns.SubscriptionManager
+	newPeers             chan *ServerPeer
+	donePeers            chan *ServerPeer
+	banPeers             chan *ServerPeer
+	query                chan interface{}
+	firstPeerConnect     chan struct{}
+	peerHeightsUpdate    chan updatePeerHeightsMsg
+	wg                   sync.WaitGroup
+	quit                 chan struct{}
+	timeSource           blockchain.MedianTimeSource
+	services             wire.ServiceFlag
+	utxoScanner          *UtxoScanner
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
-
-	// These are only necessary until the block subscription logic is
-	// refactored out into its own package and we can have different message
-	// types sent in the notifications.
-	//
-	// TODO(aakselrod): Get rid of this when doing the refactoring above.
-	reorgedBlockHeaders map[chainhash.Hash]*wire.BlockHeader
-	mtxReorgHeader      sync.RWMutex
 
 	userAgentName    string
 	userAgentVersion string
@@ -624,26 +616,24 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	amgr := addrmgr.New(cfg.DataDir, nameResolver)
 
 	s := ChainService{
-		chainParams:         cfg.ChainParams,
-		addrManager:         amgr,
-		newPeers:            make(chan *ServerPeer, MaxPeers),
-		donePeers:           make(chan *ServerPeer, MaxPeers),
-		banPeers:            make(chan *ServerPeer, MaxPeers),
-		query:               make(chan interface{}),
-		quit:                make(chan struct{}),
-		firstPeerConnect:    make(chan struct{}),
-		peerHeightsUpdate:   make(chan updatePeerHeightsMsg),
-		timeSource:          blockchain.NewMedianTime(),
-		services:            Services,
-		userAgentName:       UserAgentName,
-		userAgentVersion:    UserAgentVersion,
-		blockSubscribers:    make(map[*blockSubscription]struct{}),
-		reorgedBlockHeaders: make(map[chainhash.Hash]*wire.BlockHeader),
-		nameResolver:        nameResolver,
-		dialer:              dialer,
-		blocksOnly:          cfg.BlocksOnly,
-		mempool:             NewMempool(),
-		proxy:               cfg.Proxy,
+		chainParams:       cfg.ChainParams,
+		addrManager:       amgr,
+		newPeers:          make(chan *ServerPeer, MaxPeers),
+		donePeers:         make(chan *ServerPeer, MaxPeers),
+		banPeers:          make(chan *ServerPeer, MaxPeers),
+		query:             make(chan interface{}),
+		quit:              make(chan struct{}),
+		firstPeerConnect:  make(chan struct{}),
+		peerHeightsUpdate: make(chan updatePeerHeightsMsg),
+		timeSource:        blockchain.NewMedianTime(),
+		services:          Services,
+		userAgentName:     UserAgentName,
+		userAgentVersion:  UserAgentVersion,
+		nameResolver:      nameResolver,
+		dialer:            dialer,
+		blocksOnly:        cfg.BlocksOnly,
+		mempool:           NewMempool(),
+		proxy:             cfg.Proxy,
 	}
 
 	// We set the queryPeers method to point to queryChainServicePeers,
@@ -697,6 +687,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 	s.blockManager = bm
+	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
 
 	// Only setup a function to return new addresses to connect to when not
 	// running in connect-only mode.  The simulation network is always in
@@ -941,22 +932,15 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		// header in the disconnected notification in case we're rolling
 		// back farther and the notification subscriber needs it but
 		// can't read it before it's deleted from the store.
-		//
-		// TODO(aakselrod): Get rid of this when subscriptions are
-		// factored out into their own package.
-		lastHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
+		prevHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
 		if err != nil {
 			return nil, err
 		}
-		s.mtxReorgHeader.Lock()
-		s.reorgedBlockHeaders[header.PrevBlock] = lastHeader
-		s.mtxReorgHeader.Unlock()
 
 		// Now we send the block disconnected notifications.
-		s.sendSubscribedMsg(&blockMessage{
-			msgType: disconnect,
-			header:  header,
-		})
+		s.blockManager.onBlockDisconnected(
+			*header, headerHeight, *prevHeader,
+		)
 	}
 	return bs, nil
 }
@@ -972,6 +956,7 @@ func (s *ChainService) peerHandler() {
 	// and stop them in this handler.
 	s.addrManager.Start()
 	s.blockManager.Start()
+	s.blockSubscriptionMgr.Start()
 	s.utxoScanner.Start()
 
 	state := &peerState{
@@ -1030,6 +1015,7 @@ out:
 
 	s.connManager.Stop()
 	s.utxoScanner.Stop()
+	s.blockSubscriptionMgr.Stop()
 	s.blockManager.Stop()
 	s.addrManager.Stop()
 
