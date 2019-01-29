@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/gcash/bchd/btcjson"
-	"github.com/gcash/bchutil/bloom"
 	"net"
 	"strconv"
 	"sync"
@@ -52,7 +51,7 @@ var (
 
 	// RequiredServices describes the services that are required to be
 	// supported by outbound peers.
-	RequiredServices = wire.SFNodeNetwork | wire.SFNodeCF | wire.SFNodeBloom
+	RequiredServices = wire.SFNodeNetwork | wire.SFNodeCF
 
 	// BanThreshold is the maximum ban score before a peer is banned.
 	BanThreshold = uint32(100)
@@ -293,12 +292,6 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// Add valid peer to the server.
 	sp.server.AddPeer(sp)
 
-	// If we are not in blocks only mode then send a match all bloom filter to
-	// the remote peer.
-	if !sp.server.blocksOnly {
-		filter := bloom.NewFilter(0, 0, 1, wire.BloomUpdateNone)
-		sp.QueueMessage(filter.MsgFilterLoad(), nil)
-	}
 	return nil
 }
 
@@ -1267,20 +1260,8 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 		ChainParams:      &sp.server.chainParams,
 		Services:         sp.server.services,
 		ProtocolVersion:  wire.FeeFilterVersion,
-		DisableRelayTx:   true,
+		DisableRelayTx:   sp.server.blocksOnly,
 	}
-}
-
-// EnableTxDownload will turn on downloading unconfirmed transactions
-// when called.
-func (s *ChainService) EnableTxDownload() {
-	s.blockManager.peerChan <- enableTxDownloadMsg{}
-}
-
-// DisableTxDownload will turn off downloading unconfirmed transactions
-// when called.
-func (s *ChainService) DisableTxDownload() {
-	s.blockManager.peerChan <- disableTxDownloadMsg{}
 }
 
 // outboundPeerConnected is invoked by the connection manager when a new
