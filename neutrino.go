@@ -515,6 +515,9 @@ type Config struct {
 	// you're going to use a lot more bandwidth but it may be acceptable for apps
 	// which only run for brief periods of time.
 	BlocksOnly bool
+
+	// Proxy is an address to use to connect remote peers using the socks5 proxy.
+	Proxy string
 }
 
 // ChainService is instantiated with functional options
@@ -580,6 +583,8 @@ type ChainService struct {
 	blocksOnly bool
 
 	mempool *Mempool
+
+	proxy string
 }
 
 // NewChainService returns a new chain service configured to connect to the
@@ -636,6 +641,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		dialer:              dialer,
 		blocksOnly:          cfg.BlocksOnly,
 		mempool:             NewMempool(),
+		proxy:               cfg.Proxy,
 	}
 
 	// We set the queryPeers method to point to queryChainServicePeers,
@@ -1261,6 +1267,7 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 		Services:         sp.server.services,
 		ProtocolVersion:  wire.FeeFilterVersion,
 		DisableRelayTx:   sp.server.blocksOnly,
+		Proxy:            sp.server.proxy,
 	}
 }
 
