@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"container/list"
 	"fmt"
-	"github.com/gcash/bchutil/bloom"
 	"github.com/go-errors/errors"
 	"math"
 	"math/big"
@@ -88,14 +87,6 @@ type txMsg struct {
 	tx   *bchutil.Tx
 	peer *ServerPeer
 }
-
-// disableTxDownloadMsg tells the peer handler to send a match none
-// bloom filter to all peers
-type disableTxDownloadMsg struct{}
-
-// enableTxDownloadMsg tells the peer handler to send a match all
-//// bloom filter to all peers
-type enableTxDownloadMsg struct{}
 
 // blockManager provides a concurrency safe block manager for handling all
 // incoming blocks.
@@ -1653,12 +1644,6 @@ out:
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
 
-			case *disableTxDownloadMsg:
-				b.handleDisableTxDownloadMsg(candidatePeers)
-
-			case *enableTxDownloadMsg:
-				b.handleEnableTxDownloadMsg(candidatePeers)
-
 			default:
 				log.Warnf("Invalid message type in block "+
 					"handler: %T", msg)
@@ -2061,30 +2046,6 @@ func (b *blockManager) handleTxMsg(tmsg *txMsg) {
 	}
 	b.server.mempool.AddTransaction(tmsg.tx)
 	delete(b.requestedTxns, *txHash)
-}
-
-// handleDisableTxDownloadMsg sends a match none bloom filter to all peers
-func (b *blockManager) handleDisableTxDownloadMsg(peers *list.List) {
-	for e := peers.Front(); e != nil; e = e.Next() {
-		sp, ok := e.Value.(*ServerPeer)
-		if !ok {
-			log.Error("handleDisableTxDownloadMsg error asserting type ServerPeer")
-		}
-		filter := bloom.NewFilter(0, 0, 0, wire.BloomUpdateNone)
-		sp.QueueMessage(filter.MsgFilterLoad(), nil)
-	}
-}
-
-// handleEnableTxDownloadMsg sends a match all bloom filter to all peers
-func (b *blockManager) handleEnableTxDownloadMsg(peers *list.List) {
-	for e := peers.Front(); e != nil; e = e.Next() {
-		sp, ok := e.Value.(*ServerPeer)
-		if !ok {
-			log.Error("handleEnableTxDownloadMsg error asserting type ServerPeer")
-		}
-		filter := bloom.NewFilter(0, 0, 1, wire.BloomUpdateNone)
-		sp.QueueMessage(filter.MsgFilterLoad(), nil)
-	}
 }
 
 // QueueHeaders adds the passed headers message and peer to the block handling
