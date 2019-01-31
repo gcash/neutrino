@@ -692,7 +692,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&s)
+	bm, err := newBlockManager(&s, s.firstPeerConnect)
 	if err != nil {
 		return nil, err
 	}
@@ -963,7 +963,7 @@ func (s *ChainService) peerHandler() {
 	// synchronize things, it's easier and slightly faster to simply start
 	// and stop them in this handler.
 	s.addrManager.Start()
-	s.blockManager.Start(s.firstPeerConnect)
+	s.blockManager.Start()
 	s.utxoScanner.Start()
 
 	state := &peerState{

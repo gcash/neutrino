@@ -163,6 +163,11 @@ type blockManager struct {
 	// peerChan is a channel for messages that come from peers
 	peerChan chan interface{}
 
+	// firstPeerSignal is a channel that's sent upon once the main daemon
+	// has made its first peer connection. We use this to ensure we don't
+	// try to perform any queries before we have our first peer.
+	firstPeerSignal <-chan struct{}
+
 	wg   sync.WaitGroup
 	quit chan struct{}
 
@@ -181,7 +186,9 @@ type blockManager struct {
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
 // processing asynchronous block and inv updates.
-func newBlockManager(s *ChainService) (*blockManager, error) {
+func newBlockManager(s *ChainService,
+	firstPeerSignal <-chan struct{}) (*blockManager, error) {
+
 	targetTimespan := int64(s.chainParams.TargetTimespan / time.Second)
 	targetTimePerBlock := int64(s.chainParams.TargetTimePerBlock / time.Second)
 	adjustmentFactor := s.chainParams.RetargetAdjustmentFactor
@@ -206,6 +213,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
 		requestedTxns:       make(map[chainhash.Hash]struct{}),
+		firstPeerSignal:     firstPeerSignal,
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait
@@ -261,7 +269,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 }
 
 // Start begins the core block handler which processes block and inv messages.
-func (b *blockManager) Start(firstPeerConnect <-chan struct{}) {
+func (b *blockManager) Start() {
 	// Already started?
 	if atomic.AddInt32(&b.started, 1) != 1 {
 		return
@@ -275,10 +283,10 @@ func (b *blockManager) Start(firstPeerConnect <-chan struct{}) {
 
 		log.Debug("Waiting for peer connection...")
 
-		// Before starting the cfHandler we want to make sure we are connected
-		// with at least one peer.
+		// Before starting the cfHandler we want to make sure we are
+		// connected with at least one peer.
 		select {
-		case <-firstPeerConnect:
+		case <-b.firstPeerSignal:
 		case <-b.quit:
 			return
 		}
