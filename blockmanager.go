@@ -583,7 +583,7 @@ waitForHeaders:
 			checkpoints, store, fType,
 		)
 		if err != nil {
-			log.Debugf("got error attempting to determine correct "+
+			log.Warnf("got error attempting to determine correct "+
 				"cfheader checkpoints: %v, trying again", err)
 		}
 		if len(goodCheckpoints) == 0 {
@@ -1647,7 +1647,7 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 
 			if *header != checkpoint {
 				log.Warnf("mismatch at height %v, expected %v got "+
-					"%v", ckptHeight, header, checkpoint)
+					"%v", ckptHeight, checkpoint, header)
 				return i, nil
 			}
 		}
