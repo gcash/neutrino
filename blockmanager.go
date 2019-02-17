@@ -685,7 +685,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	store *headerfs.FilterHeaderStore, fType wire.FilterType) error {
 
 	// Get the filter header store's chain tip.
-	filterTip, filtHeight, err := store.ChainTip()
+	_, filtHeight, err := store.ChainTip()
 	if err != nil {
 		return fmt.Errorf("error getting filter chain tip: %v", err)
 	}
@@ -715,24 +715,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 
 	// Query all peers for the responses.
 	startHeight := filtHeight + 1
-	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
-
-	// Ban any peer that responds with the wrong prev filter header.
-	for peer, msg := range headers {
-		if msg.PrevFilterHeader != *filterTip {
-			log.Infof("Banning peer=%v for invalid prev filter "+
-				"header", peer)
-
-			sp := b.server.PeerByAddr(peer)
-			if sp != nil {
-				b.server.BanPeer(sp)
-				sp.Disconnect()
-			}
-
-			delete(headers, peer)
-		}
-	}
-
+	headers := b.getCFHeadersForAllPeers(startHeight, fType)
 	if len(headers) == 0 {
 		return fmt.Errorf("couldn't get cfheaders from peers")
 	}
@@ -740,7 +723,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// For each header, go through and check whether all headers messages
 	// have the same filter hash. If we find a difference, get the block,
 	// calculate the filter, and throw out any mismatching peers.
-	for i := 0; i < numHeaders; i++ {
+	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
 		if checkForCFHeaderMismatch(headers, i) {
 			targetHeight := startHeight + uint32(i)
 
@@ -1253,7 +1236,7 @@ func (b *blockManager) resolveConflict(
 	// Now we get all of the mismatched CFHeaders from peers, and check
 	// which ones are valid.
 	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
-	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
+	headers := b.getCFHeadersForAllPeers(startHeight, fType)
 
 	// Make sure we're working off the same baseline. Otherwise, we want to
 	// go back and get checkpoints again.
@@ -1270,7 +1253,7 @@ func (b *blockManager) resolveConflict(
 	// For each header, go through and check whether all headers messages
 	// have the same filter hash. If we find a difference, get the block,
 	// calculate the filter, and throw out any mismatching peers.
-	for i := 0; i < numHeaders; i++ {
+	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
 		if checkForCFHeaderMismatch(headers, i) {
 			// Get the block header for this height, along with the
 			// block as well.
@@ -1445,10 +1428,9 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 }
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
-// returns a map of responses from all peers. The second return value is the
-// number for cfheaders in each response.
+// returns a map of responses from all peers.
 func (b *blockManager) getCFHeadersForAllPeers(height uint32,
-	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int) {
+	fType wire.FilterType) map[string]*wire.MsgCFHeaders {
 
 	// Create the map we're returning.
 	headers := make(map[string]*wire.MsgCFHeaders)
@@ -1462,14 +1444,13 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 			height + wire.MaxCFHeadersPerMsg - 1,
 		)
 		if err != nil {
-			return nil, 0
+			return headers
 		}
 	}
 
 	// Calculate the hash and use it to create the query message.
 	stopHash := stopHeader.BlockHash()
 	msg := wire.NewMsgGetCFHeaders(fType, height, &stopHash)
-	numHeaders := int(stopHeight - height + 1)
 
 	// Send the query to all peers and record their responses in the map.
 	b.server.queryAllPeers(
@@ -1479,9 +1460,7 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 			switch m := resp.(type) {
 			case *wire.MsgCFHeaders:
 				if m.StopHash == stopHash &&
-					m.FilterType == fType &&
-					len(m.FilterHashes) == numHeaders {
-
+					m.FilterType == fType {
 					headers[sp.Addr()] = m
 
 					// We got an answer from this peer so
@@ -1492,7 +1471,7 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 		},
 	)
 
-	return headers, numHeaders
+	return headers
 }
 
 // fetchFilterFromAllPeers attempts to fetch a filter for the target filter
