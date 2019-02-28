@@ -1388,8 +1388,9 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 			//
 			// TODO(roasbeef): eventually just do a comparison
 			// against decompressed filters
-			for _, tx := range block.Transactions {
+			for i, tx := range block.Transactions {
 				for _, txOut := range tx.TxOut {
+					match := true
 					switch {
 					// If the script itself is blank, then
 					// we'll skip this as it doesn't
@@ -1397,23 +1398,40 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 					case len(txOut.PkScript) == 0:
 						continue
 
-					// We'll also skip any OP_RETURN
-					// scripts as well since we don't index
-					// these in order to avoid a circular
-					// dependency.
-					case txOut.PkScript[0] == txscript.OP_RETURN &&
-						txscript.IsPushOnlyScript(txOut.PkScript[1:]):
+						// In order to allow the filters to later be committed
+						// to within an OP_RETURN output, we ignore all OP_RETURNs
+						// in the coinbase to avoid a circular dependency.
+					case i == 0 && txOut.PkScript[0] == txscript.OP_RETURN:
 						continue
-					}
 
-					match, err := filter.Match(
-						filterKey, txOut.PkScript,
-					)
-					if err != nil {
-						// If we're unable to query
-						// this filter, then we'll skip
-						// this peer all together.
-						continue peerVerification
+						// If this is a non-coinbase OP_RETURN output then add all
+						// the data elements in the script.
+					case txOut.PkScript[0] == txscript.OP_RETURN:
+						dataElements, err := txscript.ExtractDataElements(txOut.PkScript)
+						if err != nil {
+							continue
+						}
+						for _, elem := range dataElements {
+							matchElem, err := filter.Match(filterKey, elem)
+							if err != nil {
+								// If we're unable to query
+								// this filter, then we'll skip
+								// this peer all together.
+								continue peerVerification
+							}
+							if !matchElem {
+								match = false
+							}
+						}
+					default:
+						var err error
+						match, err = filter.Match(filterKey, txOut.PkScript)
+						if err != nil {
+							// If we're unable to query
+							// this filter, then we'll skip
+							// this peer all together.
+							continue peerVerification
+						}
 					}
 
 					if match {
