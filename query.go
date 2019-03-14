@@ -701,7 +701,7 @@ checkResponses:
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType) (*gcs.Filter, error) {
 
-	cacheKey := cache.FilterCacheKey{blockHash, filterType}
+	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
 
 	filterValue, err := s.FilterCache.Get(cacheKey)
 	if err != nil {
@@ -715,7 +715,7 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType, filter *gcs.Filter) error {
 
-	cacheKey := cache.FilterCacheKey{blockHash, filterType}
+	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
