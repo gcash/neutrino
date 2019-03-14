@@ -6,7 +6,7 @@ import (
 	"github.com/gcash/neutrino/filterdb"
 )
 
-// filterCacheKey represents the key used to access filters in the FilterCache.
+// FilterCacheKey represents the key used to access filters in the FilterCache.
 type FilterCacheKey struct {
 	BlockHash  chainhash.Hash
 	FilterType filterdb.FilterType
