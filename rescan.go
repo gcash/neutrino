@@ -429,9 +429,15 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		log.Infof("Setting timer to attempt to re-fetch filter for "+
 			"hash=%v, height=%v", headerTip.BlockHash(), height)
 
-		// We'll start a timer to re-send this header so we re-process
-		// if in the case that we don't get a re-org soon afterwards.
-		blockReFetchTimer = time.AfterFunc(blockRetryInterval, func() {
+		blockReFetch := func() {
+			// If we're unable to process notifications at the
+			// moment (due to not being current), we'll reset our
+			// timer.
+			if blockReFetchTimer != nil && blockSubscription == nil {
+				blockReFetchTimer.Reset(blockRetryInterval)
+				return
+			}
+
 			log.Infof("Resending rescan header for block hash=%v, "+
 				"height=%v", headerTip.BlockHash(), height)
 
@@ -440,7 +446,13 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			case blockSubscription.Notifications <- ntfn:
 			case <-ro.quit:
 			}
-		})
+		}
+
+		// We'll start a timer to re-send this header so we re-process
+		// if in the case that we don't get a re-org soon afterwards.
+		blockReFetchTimer = time.AfterFunc(
+			blockRetryInterval, blockReFetch,
+		)
 	}
 
 	// We'll need to keep track of whether we are current with the chain in
@@ -559,9 +571,13 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			return err
 		}
 
-		// We'll successfully fetched this current block, so we'll reset
+		// We've successfully fetched this current block, so we'll reset
 		// the retry timer back to nil.
-		blockReFetchTimer = nil
+		if blockReFetchTimer != nil {
+			blockReFetchTimer.Stop()
+			blockReFetchTimer = nil
+		}
+
 		return nil
 	}
 
@@ -597,7 +613,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		curStamp.Height--
 
 		// Now that we got a re-org, if we had a re-fetch timer going,
-		// we'll re-set is at the new header tip.
+		// we'll reset it be at the new header tip.
 		if blockReFetchTimer != nil {
 			resetBlockReFetchTimer(
 				curHeader, uint32(curStamp.Height),
@@ -727,7 +743,7 @@ rescanLoop:
 
 				current = true
 
-				// Ensure we cancel the old subscroption if
+				// Ensure we cancel the old subscription if
 				// we're going back to scan for missed blocks.
 				if blockSubscription != nil {
 					blockSubscription.Cancel()
