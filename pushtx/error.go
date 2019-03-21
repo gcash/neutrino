@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/btcsuite/btcd/wire"
+	"github.com/gcash/bchd/wire"
 )
 
 // BroadcastErrorCode uniquely identifies the broadcast error.

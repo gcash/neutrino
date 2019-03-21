@@ -3,8 +3,8 @@ package pushtx_test
 import (
 	"testing"
 
-	"github.com/btcsuite/btcd/wire"
-	"github.com/lightninglabs/neutrino/pushtx"
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/neutrino/pushtx"
 )
 
 // TestParseBroadcastErrorCode ensures that we properly construct a
