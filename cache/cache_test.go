@@ -4,13 +4,13 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/lightninglabs/neutrino/cache"
-	"github.com/lightninglabs/neutrino/cache/lru"
-	"github.com/lightninglabs/neutrino/filterdb"
+	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/neutrino/cache"
+	"github.com/gcash/neutrino/cache/lru"
+	"github.com/gcash/neutrino/filterdb"
 )
 
 // TestBlockFilterCaches tests that we can put and retrieve elements from all
@@ -36,7 +36,7 @@ func TestBlockFilterCaches(t *testing.T) {
 	var (
 		blockHashes []chainhash.Hash
 		filters     []*gcs.Filter
-		blocks      []*btcutil.Block
+		blocks      []*bchutil.Block
 	)
 	for i := 0; i < numElements; i++ {
 		var blockHash chainhash.Hash
@@ -61,13 +61,13 @@ func TestBlockFilterCaches(t *testing.T) {
 		}
 
 		msgBlock := &wire.MsgBlock{}
-		block := btcutil.NewBlock(msgBlock)
+		block := bchutil.NewBlock(msgBlock)
 		blocks = append(blocks, block)
 
 		// Add the block to the block caches, using the block INV
 		// vector as key.
 		blockKey := wire.NewInvVect(
-			wire.InvTypeWitnessBlock, &blockHash,
+			wire.InvTypeBlock, &blockHash,
 		)
 		for _, c := range blockCaches {
 			c.Put(*blockKey, &cache.CacheableBlock{block})
@@ -95,7 +95,7 @@ func TestBlockFilterCaches(t *testing.T) {
 
 		// Check block caches.
 		blockKey := wire.NewInvVect(
-			wire.InvTypeWitnessBlock, &blockHash,
+			wire.InvTypeBlock, &blockHash,
 		)
 		for _, c := range blockCaches {
 			b, err := c.Get(*blockKey)
