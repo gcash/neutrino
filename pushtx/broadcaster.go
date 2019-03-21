@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	// ErrBroadcastStopped is an error returned when we attempt to process a
+	// ErrBroadcasterStopped is an error returned when we attempt to process a
 	// request to broadcast a transaction but the Broadcaster has already
 	// been stopped.
 	ErrBroadcasterStopped = errors.New("broadcaster has been stopped")

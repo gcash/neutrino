@@ -139,10 +139,10 @@ func (m *SubscriptionManager) Stop() {
 	var wg sync.WaitGroup
 	wg.Add(len(m.subscribers))
 	for _, subscriber := range m.subscribers {
-		go func() {
+		go func(newSub *newSubscription) {
 			defer wg.Done()
-			subscriber.cancel()
-		}()
+			newSub.cancel()
+		}(subscriber)
 	}
 
 	wg.Wait()

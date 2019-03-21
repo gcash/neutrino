@@ -55,7 +55,7 @@ func TestBlockFilterCaches(t *testing.T) {
 		filters = append(filters, filter)
 
 		// Put the generated filter in the filter caches.
-		cacheKey := cache.FilterCacheKey{blockHash, filterType}
+		cacheKey := cache.FilterCacheKey{BlockHash: blockHash, FilterType: filterType}
 		for _, c := range filterCaches {
 			c.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 		}
@@ -70,7 +70,7 @@ func TestBlockFilterCaches(t *testing.T) {
 			wire.InvTypeBlock, &blockHash,
 		)
 		for _, c := range blockCaches {
-			c.Put(*blockKey, &cache.CacheableBlock{block})
+			c.Put(*blockKey, &cache.CacheableBlock{Block: block})
 		}
 	}
 
@@ -78,7 +78,7 @@ func TestBlockFilterCaches(t *testing.T) {
 	// retrieve all elements from the caches.
 	for i, blockHash := range blockHashes {
 		// Check filter caches.
-		cacheKey := cache.FilterCacheKey{blockHash, filterType}
+		cacheKey := cache.FilterCacheKey{BlockHash: blockHash, FilterType: filterType}
 		for _, c := range filterCaches {
 			e, err := c.Get(cacheKey)
 			if err != nil {
