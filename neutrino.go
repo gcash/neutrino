@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/gcash/bchd/btcjson"
+	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
 	"net"
 	"strconv"
 	"sync"
@@ -896,6 +899,79 @@ func (s *ChainService) RegisterMempoolCallback(onRecvTx func(tx *bchutil.Tx, blo
 // paying to them enters the mempool.
 func (s *ChainService) NotifyMempoolReceived(addrs []bchutil.Address) {
 	s.mempool.NotifyReceived(addrs)
+}
+
+// RequestMempoolFilter requests the mempool filter from a single peer.
+func (s *ChainService) RequestMempoolFilter(addrs []bchutil.Address) {
+	go s.requestMempoolFilter(addrs)
+}
+
+func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
+	// We'll just start with our first peer and if that one fails
+	// move on to the next one. Since the mempool filter is not
+	// authenticated against a block, the remote peer could lie
+	// to us and omit transactions but we're treatign this function
+	// as best effort anyway. Worst case scenario we either download
+	// the mempool unnecessarily or have to wait for confirmation to
+	// detect our transaction.
+	for _, peer := range s.Peers() {
+		msgChan := make(chan spMsg)
+		subQuit := make(chan struct{})
+		subscription := spMsgSubscription{
+			msgChan:  msgChan,
+			quitChan: subQuit,
+		}
+		defer close(subQuit)
+
+		// Subscribe to the response
+		peer.subscribeRecvMsg(subscription)
+		peer.Peer.QueueMessage(wire.NewMsgGetCFMempool(), nil)
+
+		timeout := time.After(QueryPeerConnectTimeout)
+		select {
+		case <-timeout:
+			peer.unsubscribeRecvMsgs(subscription)
+			continue
+		case msg := <-msgChan:
+			peer.unsubscribeRecvMsgs(subscription)
+			cfFilerMsg, ok := msg.msg.(*wire.MsgCFilter)
+			if !ok {
+				log.Debugf("Received invalid response to GetCFMempool message from %s", peer.Addr())
+				continue
+			}
+			gotFilter, err := gcs.FromNBytes(
+				builder.DefaultP, builder.DefaultM,
+				cfFilerMsg.Data,
+			)
+			if err != nil {
+				log.Debugf("Received invalid CFMempool message from %s", peer.Addr())
+				continue
+			}
+			scripts := make([][]byte, 0)
+			for _, addr := range addrs {
+				script, err := txscript.PayToAddrScript(addr)
+				if err != nil {
+					log.Errorf("Error converting RequestMempoolFilter address to script: %s", err)
+					continue
+				}
+				scripts = append(scripts, script)
+			}
+			key := builder.DeriveKey(&chainhash.Hash{})
+			matched, err := gotFilter.MatchAny(key, scripts)
+			if err != nil {
+				log.Errorf("Error match RequestMempoolFilter address against filter: %s", err)
+				continue
+			}
+			// If we matched anything send the mempool message. This will trigger the remote peer
+			// to send inv messages with the mempool transactions. The rest of our code should handle
+			// processing the invs.
+			if matched {
+				peer.Peer.QueueMessage(wire.NewMsgMemPool(), nil)
+				return
+			}
+		}
+	}
+	log.Debug("Exhausted all connected peers attempting to send GetCFMempoolRequest")
 }
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.
