@@ -23,9 +23,11 @@ import (
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
+	"github.com/gcash/neutrino/blockntfns"
 	"github.com/gcash/neutrino/cache/lru"
 	"github.com/gcash/neutrino/filterdb"
 	"github.com/gcash/neutrino/headerfs"
+	"github.com/gcash/neutrino/pushtx"
 )
 
 // These are exported variables so they can be changed by users.
@@ -276,6 +278,7 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// discovered peers.
 	if sp.server.chainParams.Net != chaincfg.SimNetParams.Net {
 		addrManager := sp.server.addrManager
+
 		// Request known addresses if the server address manager needs
 		// more and the peer has a protocol version new enough to
 		// include a timestamp with addresses.
@@ -285,8 +288,23 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
 		}
 
-		// Mark the address as a known good address.
+		// Add the address to the addr manager anew, and also mark it
+		// as a good address.
+		sp.server.addrManager.AddAddresses(
+			[]*wire.NetAddress{sp.NA()}, sp.NA(),
+		)
 		addrManager.Good(sp.NA())
+
+		// Update the address manager with the advertised services for
+		// outbound connections in case they have changed. This is not
+		// done for inbound connections to help prevent malicious
+		// behavior and is skipped when running on the simulation test
+		// network since it is only intended to connect to specified
+		// peers and actively avoids advertising and connecting to
+		// discovered peers.
+		if !sp.Inbound() {
+			sp.server.addrManager.SetServices(sp.NA(), msg.Services)
+		}
 	}
 
 	// Add valid peer to the server.
@@ -393,10 +411,16 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		return
 	}
 
+	var addrsSupportingServices []*wire.NetAddress
 	for _, na := range msg.AddrList {
 		// Don't add more address if we're disconnecting.
 		if !sp.Connected() {
 			return
+		}
+
+		// Skip any that don't advertise our required services.
+		if na.Services&RequiredServices != RequiredServices {
+			continue
 		}
 
 		// Set the timestamp to 5 days ago if it's more than 24 hours
@@ -407,16 +431,25 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 			na.Timestamp = now.Add(-1 * time.Hour * 24 * 5)
 		}
 
-		// Add address to known addresses for this peer.
-		sp.addKnownAddresses([]*wire.NetAddress{na})
+		addrsSupportingServices = append(addrsSupportingServices, na)
+
 	}
+
+	// Ignore any addr messages if none of them contained our required
+	// services.
+	if len(addrsSupportingServices) == 0 {
+		return
+	}
+
+	// Add address to known addresses for this peer.
+	sp.addKnownAddresses(addrsSupportingServices)
 
 	// Add addresses to server address manager.  The address manager handles
 	// the details of things such as preventing duplicate addresses, max
 	// addresses, and last seen updates.
 	// XXX bitcoind gives a 2 hour time penalty here, do we want to do the
 	// same?
-	sp.server.addrManager.AddAddresses(msg.AddrList, sp.NA())
+	sp.server.addrManager.AddAddresses(addrsSupportingServices, sp.NA())
 }
 
 // OnRead is invoked when a peer receives a message and it is used to update
@@ -546,34 +579,26 @@ type ChainService struct {
 	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
 		wire.Message) bool, <-chan struct{}, ...QueryOption)
 
-	chainParams       chaincfg.Params
-	addrManager       *addrmgr.AddrManager
-	connManager       *connmgr.ConnManager
-	blockManager      *blockManager
-	newPeers          chan *ServerPeer
-	donePeers         chan *ServerPeer
-	banPeers          chan *ServerPeer
-	query             chan interface{}
-	firstPeerConnect  chan struct{}
-	peerHeightsUpdate chan updatePeerHeightsMsg
-	wg                sync.WaitGroup
-	quit              chan struct{}
-	timeSource        blockchain.MedianTimeSource
-	services          wire.ServiceFlag
-	blockSubscribers  map[*blockSubscription]struct{}
-	mtxSubscribers    sync.RWMutex
-	utxoScanner       *UtxoScanner
+	chainParams          chaincfg.Params
+	addrManager          *addrmgr.AddrManager
+	connManager          *connmgr.ConnManager
+	blockManager         *blockManager
+	blockSubscriptionMgr *blockntfns.SubscriptionManager
+	newPeers             chan *ServerPeer
+	donePeers            chan *ServerPeer
+	banPeers             chan *ServerPeer
+	query                chan interface{}
+	firstPeerConnect     chan struct{}
+	peerHeightsUpdate    chan updatePeerHeightsMsg
+	wg                   sync.WaitGroup
+	quit                 chan struct{}
+	timeSource           blockchain.MedianTimeSource
+	services             wire.ServiceFlag
+	utxoScanner          *UtxoScanner
+	broadcaster          *pushtx.Broadcaster
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
-
-	// These are only necessary until the block subscription logic is
-	// refactored out into its own package and we can have different message
-	// types sent in the notifications.
-	//
-	// TODO(aakselrod): Get rid of this when doing the refactoring above.
-	reorgedBlockHeaders map[chainhash.Hash]*wire.BlockHeader
-	mtxReorgHeader      sync.RWMutex
 
 	userAgentName    string
 	userAgentVersion string
@@ -624,26 +649,24 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	amgr := addrmgr.New(cfg.DataDir, nameResolver)
 
 	s := ChainService{
-		chainParams:         cfg.ChainParams,
-		addrManager:         amgr,
-		newPeers:            make(chan *ServerPeer, MaxPeers),
-		donePeers:           make(chan *ServerPeer, MaxPeers),
-		banPeers:            make(chan *ServerPeer, MaxPeers),
-		query:               make(chan interface{}),
-		quit:                make(chan struct{}),
-		firstPeerConnect:    make(chan struct{}),
-		peerHeightsUpdate:   make(chan updatePeerHeightsMsg),
-		timeSource:          blockchain.NewMedianTime(),
-		services:            Services,
-		userAgentName:       UserAgentName,
-		userAgentVersion:    UserAgentVersion,
-		blockSubscribers:    make(map[*blockSubscription]struct{}),
-		reorgedBlockHeaders: make(map[chainhash.Hash]*wire.BlockHeader),
-		nameResolver:        nameResolver,
-		dialer:              dialer,
-		blocksOnly:          cfg.BlocksOnly,
-		mempool:             NewMempool(),
-		proxy:               cfg.Proxy,
+		chainParams:       cfg.ChainParams,
+		addrManager:       amgr,
+		newPeers:          make(chan *ServerPeer, MaxPeers),
+		donePeers:         make(chan *ServerPeer, MaxPeers),
+		banPeers:          make(chan *ServerPeer, MaxPeers),
+		query:             make(chan interface{}),
+		quit:              make(chan struct{}),
+		firstPeerConnect:  make(chan struct{}),
+		peerHeightsUpdate: make(chan updatePeerHeightsMsg),
+		timeSource:        blockchain.NewMedianTime(),
+		services:          Services,
+		userAgentName:     UserAgentName,
+		userAgentVersion:  UserAgentVersion,
+		nameResolver:      nameResolver,
+		dialer:            dialer,
+		blocksOnly:        cfg.BlocksOnly,
+		mempool:           NewMempool(),
+		proxy:             cfg.Proxy,
 	}
 
 	// We set the queryPeers method to point to queryChainServicePeers,
@@ -697,6 +720,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 	s.blockManager = bm
+	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
 
 	// Only setup a function to return new addresses to connect to when not
 	// running in connect-only mode.  The simulation network is always in
@@ -710,6 +734,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				addr := s.addrManager.GetAddress()
 				if addr == nil {
 					break
+				}
+
+				// The peer behind this address should support
+				// all of our required services.
+				if addr.Services()&RequiredServices != RequiredServices {
+					continue
 				}
 
 				// Address will not be invalid, local or unroutable
@@ -781,10 +811,26 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
-		BestSnapshot:       s.BestBlock,
-		GetBlockHash:       s.GetBlockHash,
-		BlockFilterMatches: s.blockFilterMatches,
-		GetBlock:           s.GetBlock,
+		BestSnapshot: s.BestBlock,
+		GetBlockHash: s.GetBlockHash,
+		GetBlock:     s.GetBlock,
+		BlockFilterMatches: func(ro *rescanOptions,
+			blockHash *chainhash.Hash) (bool, error) {
+
+			return blockFilterMatches(
+				&RescanChainSource{&s}, ro, blockHash,
+			)
+		},
+	})
+
+	s.broadcaster = pushtx.NewBroadcaster(&pushtx.Config{
+		Broadcast: func(tx *wire.MsgTx) error {
+			return s.sendTransaction(tx)
+		},
+		SubscribeBlocks: func() (*blockntfns.Subscription, error) {
+			return s.blockSubscriptionMgr.NewSubscription(0)
+		},
+		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
 	return &s, nil
@@ -941,22 +987,15 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		// header in the disconnected notification in case we're rolling
 		// back farther and the notification subscriber needs it but
 		// can't read it before it's deleted from the store.
-		//
-		// TODO(aakselrod): Get rid of this when subscriptions are
-		// factored out into their own package.
-		lastHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
+		prevHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
 		if err != nil {
 			return nil, err
 		}
-		s.mtxReorgHeader.Lock()
-		s.reorgedBlockHeaders[header.PrevBlock] = lastHeader
-		s.mtxReorgHeader.Unlock()
 
 		// Now we send the block disconnected notifications.
-		s.sendSubscribedMsg(&blockMessage{
-			msgType: disconnect,
-			header:  header,
-		})
+		s.blockManager.onBlockDisconnected(
+			*header, headerHeight, *prevHeader,
+		)
 	}
 	return bs, nil
 }
@@ -965,15 +1004,6 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
 func (s *ChainService) peerHandler() {
-	// Start the address manager and block manager, both of which are
-	// needed by peers.  This is done here since their lifecycle is closely
-	// tied to this handler and rather than adding more channels to
-	// synchronize things, it's easier and slightly faster to simply start
-	// and stop them in this handler.
-	s.addrManager.Start()
-	s.blockManager.Start()
-	s.utxoScanner.Start()
-
 	state := &peerState{
 		persistentPeers: make(map[int32]*ServerPeer),
 		outboundPeers:   make(map[int32]*ServerPeer),
@@ -985,16 +1015,31 @@ func (s *ChainService) peerHandler() {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
 			s.nameResolver, func(addrs []*wire.NetAddress) {
+				var validAddrs []*wire.NetAddress
+				for _, addr := range addrs {
+					if addr.Services&RequiredServices !=
+						RequiredServices {
+						continue
+					}
+
+					validAddrs = append(validAddrs, addr)
+				}
+
+				if len(validAddrs) == 0 {
+					return
+				}
+
 				// Bitcoind uses a lookup of the dns seeder
 				// here. This is rather strange since the
 				// values looked up by the DNS seed lookups
 				// will vary quite a lot.  to replicate this
 				// behaviour we put all addresses as having
 				// come from the first one.
-				s.addrManager.AddAddresses(addrs, addrs[0])
+				s.addrManager.AddAddresses(
+					validAddrs, validAddrs[0],
+				)
 			})
 	}
-	go s.connManager.Start()
 
 out:
 	for {
@@ -1027,11 +1072,6 @@ out:
 			break out
 		}
 	}
-
-	s.connManager.Stop()
-	s.utxoScanner.Stop()
-	s.blockManager.Stop()
-	s.addrManager.Stop()
 
 	// Drain channels before exiting so nothing is left waiting around
 	// to send.
@@ -1252,14 +1292,14 @@ func disconnectPeer(peerList map[int32]*ServerPeer,
 	return false
 }
 
-// PublishTransaction sends the transaction to the consensus RPC server so it
-// can be propigated to other nodes and eventually mined.
-func (s *ChainService) PublishTransaction(tx *wire.MsgTx) error {
+// SendTransaction broadcasts the transaction to all currently active peers so
+// it can be propagated to other nodes and eventually mined. An error won't be
+// returned if the transaction already exists within the mempool. Any
+// transaction broadcast through this method will be rebroadcast upon every
+// change of the tip of the chain.
+func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 	// TODO(roasbeef): pipe through querying interface
-
-	/*_, err := s.rpcClient.SendRawTransaction(tx, false)
-	return err*/
-	return nil
+	return s.broadcaster.Broadcast(tx)
 }
 
 // newPeerConfig returns the configuration for the given ServerPeer.
@@ -1350,16 +1390,33 @@ func (s *ChainService) ChainParams() chaincfg.Params {
 }
 
 // Start begins connecting to peers and syncing the blockchain.
-func (s *ChainService) Start() {
+func (s *ChainService) Start() error {
 	// Already started?
 	if atomic.AddInt32(&s.started, 1) != 1 {
-		return
+		return nil
 	}
+
+	// Start the address manager and block manager, both of which are
+	// needed by peers.
+	s.addrManager.Start()
+	s.blockManager.Start()
+	s.blockSubscriptionMgr.Start()
+
+	s.utxoScanner.Start()
+
+	if err := s.broadcaster.Start(); err != nil {
+		return fmt.Errorf("unable to start transaction broadcaster: %v",
+			err)
+	}
+
+	go s.connManager.Start()
 
 	// Start the peer handler which in turn starts the address and block
 	// managers.
 	s.wg.Add(1)
 	go s.peerHandler()
+
+	return nil
 }
 
 // Stop gracefully shuts down the server by stopping and disconnecting all
@@ -1369,6 +1426,13 @@ func (s *ChainService) Stop() error {
 	if atomic.AddInt32(&s.shutdown, 1) != 1 {
 		return nil
 	}
+
+	s.connManager.Stop()
+	s.broadcaster.Stop()
+	s.utxoScanner.Stop()
+	s.blockSubscriptionMgr.Stop()
+	s.blockManager.Stop()
+	s.addrManager.Stop()
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
@@ -1391,4 +1455,42 @@ func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
 		}
 	}
 	return nil
+}
+
+// RescanChainSource is a wrapper type around the ChainService struct that will
+// be used to satisfy the rescan.ChainSource interface.
+type RescanChainSource struct {
+	*ChainService
+}
+
+// A compile-time check to ensure that RescanChainSource implements the
+// rescan.ChainSource interface.
+var _ ChainSource = (*RescanChainSource)(nil)
+
+// GetBlockHeaderByHeight returns the header of the block with the given height.
+func (s *RescanChainSource) GetBlockHeaderByHeight(
+	height uint32) (*wire.BlockHeader, error) {
+	return s.BlockHeaders.FetchHeaderByHeight(height)
+}
+
+// GetBlockHeader returns the header of the block with the given hash.
+func (s *RescanChainSource) GetBlockHeader(
+	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+	return s.BlockHeaders.FetchHeader(hash)
+}
+
+// GetFilterHeaderByHeight returns the filter header of the block with the given
+// height.
+func (s *RescanChainSource) GetFilterHeaderByHeight(
+	height uint32) (*chainhash.Hash, error) {
+	return s.RegFilterHeaders.FetchHeaderByHeight(height)
+}
+
+// Subscribe returns a block subscription that delivers block notifications in
+// order. The bestHeight parameter can be used to signal that a backlog of
+// notifications should be delivered from this height. When providing a height
+// of 0, a backlog will not be delivered.
+func (s *RescanChainSource) Subscribe(
+	bestHeight uint32) (*blockntfns.Subscription, error) {
+	return s.blockSubscriptionMgr.NewSubscription(bestHeight)
 }

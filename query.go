@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
+
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
@@ -17,6 +18,7 @@ import (
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/neutrino/cache"
 	"github.com/gcash/neutrino/filterdb"
+	"github.com/gcash/neutrino/pushtx"
 )
 
 var (
@@ -71,12 +73,6 @@ type queryOptions struct {
 	// almost never need to re-match a filter once it's been fetched unless
 	// they're doing something like a key import.
 	persistToDisk bool
-}
-
-// filterCacheKey represents the key used for FilterCache of the ChainService.
-type filterCacheKey struct {
-	blockHash  *chainhash.Hash
-	filterType filterdb.FilterType
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -705,7 +701,7 @@ checkResponses:
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType) (*gcs.Filter, error) {
 
-	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
 
 	filterValue, err := s.FilterCache.Get(cacheKey)
 	if err != nil {
@@ -719,7 +715,7 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType, filter *gcs.Filter) error {
 
-	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
@@ -1005,15 +1001,15 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
-// SendTransaction sends a transaction to all peers. It returns an error if any
+// sendTransaction sends a transaction to all peers. It returns an error if any
 // peer rejects the transaction.
 //
 // TODO: Better privacy by sending to only one random peer and watching
 // propagation, requires better peer selection support in query API.
-func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
-
-	var err error
-
+//
+// TODO(wilmer): Move to pushtx package after introducing a query package. This
+// cannot be done at the moment due to circular dependencies.
+func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query so that we can check what inv type
 	// to use. Broadcast the inv to all peers, responding to any getdata
@@ -1030,37 +1026,98 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	inv := wire.NewMsgInv()
 	inv.AddInvVect(wire.NewInvVect(invType, &txHash))
 
+	// We'll gather all of the peers who replied to our query, along with
+	// the ones who rejected it and their reason for rejecting it. We'll use
+	// this to determine whether our transaction was actually rejected.
+	numReplied := 0
+	rejections := make(map[pushtx.BroadcastError]int)
+
 	// Send the peer query and listen for getdata.
 	s.queryAllPeers(
 		inv,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
+
 			switch response := resp.(type) {
+			// A peer has replied with a GetData message, so we'll
+			// send them the transaction.
 			case *wire.MsgGetData:
 				for _, vec := range response.InvList {
 					if vec.Hash == txHash {
 						sp.QueueMessageWithEncoding(
-							tx, nil, qo.encoding)
+							tx, nil, qo.encoding,
+						)
+
+						numReplied++
 					}
 				}
+
+			// A peer has rejected our transaction for whatever
+			// reason. Rather than returning to the caller upon the
+			// first rejection, we'll gather them all to determine
+			// whether it is critical/fatal.
 			case *wire.MsgReject:
-				if response.Hash == txHash {
-					err = fmt.Errorf("Transaction %s "+
-						"rejected by %s: %s",
-						tx.TxHash(), sp.Addr(),
-						response.Reason)
-					log.Errorf(err.Error())
-					close(quit)
+				// Ensure this rejection is for the transaction
+				// we're attempting to broadcast.
+				if response.Hash != txHash {
+					return
 				}
+
+				broadcastErr := pushtx.ParseBroadcastError(
+					response, sp.Addr(),
+				)
+				rejections[*broadcastErr]++
 			}
 		},
 		// Default to 500ms timeout. Default for queryAllPeers is a
 		// single try.
+		//
+		// TODO(wilmer): Is this timeout long enough assuming a
+		// worst-case round trip? Also needs to take into account that
+		// the other peer must query its own state to determine whether
+		// it should accept the transaction.
 		append(
 			[]QueryOption{Timeout(time.Millisecond * 500)},
 			options...,
 		)...,
 	)
 
-	return err
+	// If none of our peers replied to our query, we'll avoid returning an
+	// error as the reliable broadcaster will take care of broadcasting this
+	// transaction upon every block connected/disconnected.
+	if numReplied == 0 {
+		log.Warnf("No peers replied to inv message for transaction %v",
+			tx.TxHash())
+		return nil
+	}
+
+	// If all of our peers who replied to our query also rejected our
+	// transaction, we'll deem that there was actually something wrong with
+	// it so we'll return the most rejected error between all of our peers.
+	//
+	// TODO(wilmer): This might be too naive, some rejections are more
+	// critical than others.
+	//
+	// TODO(wilmer): This does not cover the case where a peer also rejected
+	// our transaction but didn't send the response within our given timeout
+	// and certain other cases. Due to this, we should probably decide on a
+	// threshold of rejections instead.
+	if numReplied == len(rejections) {
+		log.Warnf("All peers rejected transaction %v checking errors",
+			tx.TxHash())
+
+		mostRejectedCount := 0
+		var mostRejectedErr pushtx.BroadcastError
+
+		for broadcastErr, count := range rejections {
+			if count > mostRejectedCount {
+				mostRejectedCount = count
+				mostRejectedErr = broadcastErr
+			}
+		}
+
+		return &mostRejectedErr
+	}
+
+	return nil
 }

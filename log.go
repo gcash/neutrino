@@ -6,6 +6,9 @@ import (
 	"github.com/gcash/bchd/peer"
 	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchlog"
+
+	"github.com/gcash/neutrino/blockntfns"
+	"github.com/gcash/neutrino/pushtx"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -33,6 +36,8 @@ func UseLogger(logger bchlog.Logger) {
 	txscript.UseLogger(logger)
 	peer.UseLogger(logger)
 	addrmgr.UseLogger(logger)
+	blockntfns.UseLogger(logger)
+	pushtx.UseLogger(logger)
 }
 
 // logClosure is used to provide a closure over expensive logging operations so
