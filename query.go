@@ -299,6 +299,11 @@ func queryChainServiceBatch(
 				// The query is now marked as in-process. We
 				// begin to process it.
 				handleQuery = i
+
+				// We have a query we're working on.
+				mtxPeerStates.Lock()
+				peerStates[sp.Addr()] = queryMsgs[handleQuery]
+				mtxPeerStates.Unlock()
 				sp.QueueMessageWithEncoding(queryMsgs[i],
 					nil, qo.encoding)
 				break
@@ -333,31 +338,37 @@ func queryChainServiceBatch(
 				}
 			}
 
-			// We have a query we're working on.
-			mtxPeerStates.Lock()
-			peerStates[sp.Addr()] = queryMsgs[handleQuery]
-			mtxPeerStates.Unlock()
 			select {
 			case <-queryQuit:
 				return
 			case <-s.quit:
 				return
 			case <-quit:
+				// We failed, so set the query state back to
+				// zero and update our lastFailed state.
+				atomic.StoreUint32(&queryStates[handleQuery],
+					uint32(queryWaitSubmit))
 				return
 			case <-timeout:
 				// We failed, so set the query state back to
 				// zero and update our lastFailed state.
 				atomic.StoreUint32(&queryStates[handleQuery],
 					uint32(queryWaitSubmit))
-				if !sp.Connected() {
-					return
-				}
 
 				log.Tracef("Query for #%v failed, moving "+
 					"on: %v", handleQuery,
 					newLogClosure(func() string {
 						return spew.Sdump(queryMsgs[handleQuery])
 					}))
+				// If we timeout here we need to return. If we don't it
+				// could put the peer in a bad state and cause a deadlock
+				// if the message comes in the matchSignal chan after the
+				// timeout is fired.
+				//
+				// Returning here closes the peer goroutine but it will
+				// be reopened again with a fresh state on the next pass
+				// through the loop below.
+				return
 
 			case <-matchSignal:
 				// We got a match signal so we can mark this
@@ -550,9 +561,9 @@ checkResponses:
 		case <-allQuit:
 			break checkResponses
 
-		// A message has arrived over the subscription channel, so we
-		// execute the checkResponses callback to see if this ends our
-		// query session.
+			// A message has arrived over the subscription channel, so we
+			// execute the checkResponses callback to see if this ends our
+			// query session.
 		case sm := <-msgChan:
 			// TODO: This will get stuck if checkResponse gets
 			// stuck. This is a caveat for callers that should be
@@ -646,17 +657,17 @@ checkResponses:
 			}
 			break checkResponses
 
-		// A message has arrived over the subscription channel, so we
-		// execute the checkResponses callback to see if this ends our
-		// query session.
+			// A message has arrived over the subscription channel, so we
+			// execute the checkResponses callback to see if this ends our
+			// query session.
 		case sm := <-msgChan:
 			// TODO: This will get stuck if checkResponse gets
 			// stuck. This is a caveat for callers that should be
 			// fixed before exposing this function for public use.
 			checkResponse(sm.sp, sm.msg, queryQuit)
 
-		// The current peer we're querying has failed to answer the
-		// query. Time to select a new peer and query it.
+			// The current peer we're querying has failed to answer the
+			// query. Time to select a new peer and query it.
 		case <-peerTimeout.C:
 			if queryPeer != nil {
 				queryPeer.unsubscribeRecvMsgs(subscription)
@@ -1052,10 +1063,10 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 					}
 				}
 
-			// A peer has rejected our transaction for whatever
-			// reason. Rather than returning to the caller upon the
-			// first rejection, we'll gather them all to determine
-			// whether it is critical/fatal.
+				// A peer has rejected our transaction for whatever
+				// reason. Rather than returning to the caller upon the
+				// first rejection, we'll gather them all to determine
+				// whether it is critical/fatal.
 			case *wire.MsgReject:
 				// Ensure this rejection is for the transaction
 				// we're attempting to broadcast.
