@@ -915,6 +915,10 @@ func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
 	// the mempool unnecessarily or have to wait for confirmation to
 	// detect our transaction.
 	for _, peer := range s.Peers() {
+		if peer == nil || !peer.Connected() {
+			continue
+		}
+
 		msgChan := make(chan spMsg)
 		subQuit := make(chan struct{})
 		subscription := spMsgSubscription{
