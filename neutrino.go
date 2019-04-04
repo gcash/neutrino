@@ -925,49 +925,52 @@ func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
 
 		// Subscribe to the response
 		peer.subscribeRecvMsg(subscription)
-		peer.Peer.QueueMessage(wire.NewMsgGetCFMempool(), nil)
+		peer.Peer.QueueMessage(wire.NewMsgGetCFMempool(wire.GCSFilterRegular), nil)
 
-		timeout := time.After(QueryPeerConnectTimeout)
-		select {
-		case <-timeout:
-			peer.unsubscribeRecvMsgs(subscription)
-			continue
-		case msg := <-msgChan:
-			peer.unsubscribeRecvMsgs(subscription)
-			cfFilerMsg, ok := msg.msg.(*wire.MsgCFilter)
-			if !ok {
-				log.Debugf("Received invalid response to GetCFMempool message from %s", peer.Addr())
-				continue
-			}
-			gotFilter, err := gcs.FromNBytes(
-				builder.DefaultP, builder.DefaultM,
-				cfFilerMsg.Data,
-			)
-			if err != nil {
-				log.Debugf("Received invalid CFMempool message from %s", peer.Addr())
-				continue
-			}
-			scripts := make([][]byte, 0)
-			for _, addr := range addrs {
-				script, err := txscript.PayToAddrScript(addr)
-				if err != nil {
-					log.Errorf("Error converting RequestMempoolFilter address to script: %s", err)
+		timeout := time.After(QueryTimeout)
+	listenResponse:
+		for {
+			select {
+			case <-timeout:
+				peer.unsubscribeRecvMsgs(subscription)
+				break listenResponse
+			case msg := <-msgChan:
+				// We're only interested in CFilter messages
+				cfFilerMsg, ok := msg.msg.(*wire.MsgCFilter)
+				if !ok {
 					continue
 				}
-				scripts = append(scripts, script)
-			}
-			key := builder.DeriveKey(&chainhash.Hash{})
-			matched, err := gotFilter.MatchAny(key, scripts)
-			if err != nil {
-				log.Errorf("Error match RequestMempoolFilter address against filter: %s", err)
-				continue
-			}
-			// If we matched anything send the mempool message. This will trigger the remote peer
-			// to send inv messages with the mempool transactions. The rest of our code should handle
-			// processing the invs.
-			if matched {
-				peer.Peer.QueueMessage(wire.NewMsgMemPool(), nil)
-				return
+				peer.unsubscribeRecvMsgs(subscription)
+				gotFilter, err := gcs.FromNBytes(
+					builder.DefaultP, builder.DefaultM,
+					cfFilerMsg.Data,
+				)
+				if err != nil {
+					log.Debugf("Received invalid CFilter message from %s", peer.Addr())
+					break listenResponse
+				}
+				scripts := make([][]byte, 0)
+				for _, addr := range addrs {
+					script, err := txscript.PayToAddrScript(addr)
+					if err != nil {
+						log.Errorf("Error converting RequestMempoolFilter address to script: %s", err)
+						return
+					}
+					scripts = append(scripts, script)
+				}
+				key := builder.DeriveKey(&chainhash.Hash{})
+				matched, err := gotFilter.MatchAny(key, scripts)
+				if err != nil {
+					log.Errorf("Error match RequestMempoolFilter address against filter: %s", err)
+					break listenResponse
+				}
+				// If we matched anything send the mempool message. This will trigger the remote peer
+				// to send inv messages with the mempool transactions. The rest of our code should handle
+				// processing the invs.
+				if matched {
+					peer.Peer.QueueMessage(wire.NewMsgMemPool(), nil)
+					return
+				}
 			}
 		}
 	}
