@@ -739,6 +739,13 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					break
 				}
 
+				// Ignore peers that we've already banned.
+				addrString := addrmgr.NetAddressKey(addr.NetAddress())
+				if s.IsBanned(addrString) {
+					log.Debugf("Ignoring banned peer: %v", addrString)
+					continue
+				}
+
 				// The peer behind this address should support
 				// all of our required services.
 				if addr.Services()&RequiredServices != RequiredServices {
@@ -768,7 +775,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					continue
 				}
 
-				addrString := addrmgr.NetAddressKey(addr.NetAddress())
 				return s.addrStringToNetAddr(addrString)
 			}
 
