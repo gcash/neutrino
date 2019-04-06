@@ -943,9 +943,6 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				log.Warnf("Banning peer=%v for invalid "+
 					"checkpoints", sp)
 
-				// Running this in a goroutine is a hack to get around
-				// a deadlock in the blockmanager_test while still banning
-				// and disconnecting the peer.
 				go func() {
 					b.server.BanPeer(sp)
 					sp.Disconnect()
