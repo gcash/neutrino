@@ -1234,6 +1234,7 @@ func (b *blockManager) resolveConflict(
 
 	// Now we get all of the mismatched CFHeaders from peers, and check
 	// which ones are valid.
+	// TODO(halseth): check if peer serves headers that matches its checkpoints
 	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
 	headers := b.getCFHeadersForAllPeers(startHeight, fType)
 
@@ -1365,8 +1366,8 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	)
 
 	var badPeers []string
-	for peer, _ := range headers {
-		_, ok := filtersFromPeers[peer]
+	for peer, msg := range headers {
+		filter, ok := filtersFromPeers[peer]
 
 		// If a peer did not respond, ban it immediately.
 		if !ok {
@@ -1375,14 +1376,26 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 			badPeers = append(badPeers, peer)
 			continue
 		}
+
+		// If the peer is serving filters that isn't consistent with
+		// its filter hashes, ban it.
+		hash, err := builder.GetFilterHash(filter)
+		if err != nil {
+			return nil, err
+		}
+		if hash != *msg.FilterHashes[filterIndex] {
+			log.Warnf("Peer %v serving filters not consistent "+
+				"with filter hashes, considering bad.", peer)
+			badPeers = append(badPeers, peer)
+		}
 	}
 
 	if len(badPeers) != 0 {
 		return badPeers, nil
 	}
 
-	// If all peers responded, get the block and use it to detect who is
-	// serving bad filters.
+	// If all peers responded with consistent filters and hashes, get the
+	// block and use it to detect who is serving bad filters.
 	block, err := b.server.GetBlock(header.BlockHash())
 	if err != nil {
 		return nil, err
