@@ -91,7 +91,7 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 
 		// With the bucket created, we'll now construct the initial
 		// basic genesis filter and store it within the database.
-		basicFilter, err := builder.BuildBasicFilter(genesisBlock, nil)
+		basicFilter, err := builder.BuildBasicFilter(genesisBlock)
 		if err != nil {
 			return err
 		}

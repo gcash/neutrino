@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"bytes"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
 )
@@ -117,8 +118,13 @@ func (b *batchSpendReporter) ProcessBlock(blk *wire.MsgBlock,
 	rebuildWatchlist := len(newReqs) > 0 || len(spends) > 0
 	if rebuildWatchlist {
 		b.filterEntries = b.filterEntries[:0]
-		for _, entry := range b.outpoints {
+		for outpoint, entry := range b.outpoints {
 			b.filterEntries = append(b.filterEntries, entry)
+			var buf bytes.Buffer
+			if err := outpoint.Serialize(&buf); err != nil {
+				continue
+			}
+			b.filterEntries = append(b.filterEntries, buf.Bytes())
 		}
 	}
 }
@@ -141,6 +147,12 @@ func (b *batchSpendReporter) addNewRequests(reqs []*GetUtxoRequest) {
 			entry := req.Input.PkScript
 			b.outpoints[outpoint] = entry
 			b.filterEntries = append(b.filterEntries, entry)
+
+			var buf bytes.Buffer
+			if err := outpoint.Serialize(&buf); err != nil {
+				continue
+			}
+			b.filterEntries = append(b.filterEntries, buf.Bytes())
 		}
 	}
 }

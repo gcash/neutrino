@@ -123,7 +123,7 @@ var (
 			},
 		},
 	}
-	correctFilter, _ = builder.BuildBasicFilter(block, nil)
+	correctFilter, _ = builder.BuildBasicFilter(block)
 
 	fakeFilter1, _ = gcs.FromBytes(2, builder.DefaultP, builder.DefaultM, []byte{
 		0x30, 0x43, 0x02, 0x1f, 0x4d, 0x23, 0x81, 0xdc,
@@ -167,7 +167,7 @@ var (
 				decodeHashNoError("fedcba09f7654321001234567890abcdef"),
 			},
 		}
-		filter, _ := builder.BuildBasicFilter(block, nil)
+		filter, _ := builder.BuildBasicFilter(block)
 		filterHash, _ := builder.GetFilterHash(filter)
 		cfh.FilterHashes = append(cfh.FilterHashes, &filterHash)
 		return cfh
