@@ -1398,9 +1398,7 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 	log.Infof("Attempting to pinpoint mismatch in cfheaders for block=%v",
 		block.Header.BlockHash())
 
-	// Based on the type of filter, our verification algorithm will differ.
 	switch fType {
-
 	case wire.GCSFilterRegular:
 		// With the regular filter we can reconstruct the full
 		// filter from the block. If the peer didn't send us the
@@ -1425,7 +1423,6 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 				badPeers[peerAddr] = struct{}{}
 			}
 		}
-
 	default:
 		return nil, fmt.Errorf("unknown filter: %v", fType)
 	}
