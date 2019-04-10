@@ -355,20 +355,19 @@ func queryChainServiceBatch(
 				atomic.StoreUint32(&queryStates[handleQuery],
 					uint32(queryWaitSubmit))
 
+				if !sp.Connected() {
+					return
+				}
+
+				mtxPeerStates.Lock()
+				delete(peerStates, sp.Addr())
+				mtxPeerStates.Unlock()
+
 				log.Tracef("Query for #%v failed, moving "+
 					"on: %v", handleQuery,
 					newLogClosure(func() string {
 						return spew.Sdump(queryMsgs[handleQuery])
 					}))
-				// If we timeout here we need to return. If we don't it
-				// could put the peer in a bad state and cause a deadlock
-				// if the message comes in the matchSignal chan after the
-				// timeout is fired.
-				//
-				// Returning here closes the peer goroutine but it will
-				// be reopened again with a fresh state on the next pass
-				// through the loop below.
-				return
 
 			case <-matchSignal:
 				// We got a match signal so we can mark this
