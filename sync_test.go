@@ -522,6 +522,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
+
 	banPeer(harness.svc, harness.h2)
 	err = harness.svc.SendTransaction(authTx1.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
@@ -564,6 +565,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
+
 	banPeer(harness.svc, harness.h2)
 	err = harness.svc.SendTransaction(authTx2.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
@@ -910,20 +912,8 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 				return
 			}
 
-			inputScripts, err := fetchPrevInputScripts(
-				haveBlock.MsgBlock(),
-				harness.h1,
-			)
-			if err != nil {
-				errChan <- fmt.Errorf("unable to create prev "+
-					"input scripts: %v", err)
-				return
-			}
-
 			// Calculate basic filter from block.
-			calcFilter, err := builder.BuildBasicFilter(
-				haveBlock.MsgBlock(), inputScripts,
-			)
+			calcFilter, err := builder.BuildBasicFilter(haveBlock.MsgBlock())
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build basic "+
 					"filter for block %d (%s): %s", height,
@@ -1352,7 +1342,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
 	rescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{svc},
+		&neutrino.RescanChainSource{ChainService: svc},
 		neutrino.QuitChan(quit),
 		neutrino.WatchAddrs(addr),
 		neutrino.StartBlock(startBlock),

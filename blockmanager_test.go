@@ -112,9 +112,7 @@ func generateHeaders(genesisBlockHeader *wire.BlockHeader,
 	// The filter hashes (not the filter headers!) will be sent as
 	// part of the CFHeaders response, so we also keep track of
 	// them.
-	genesisFilter, err := builder.BuildBasicFilter(
-		chaincfg.SimNetParams.GenesisBlock, nil,
-	)
+	genesisFilter, err := builder.BuildBasicFilter(chaincfg.SimNetParams.GenesisBlock)
 	if err != nil {
 		return nil, fmt.Errorf("unable to build genesis filter: %v",
 			err)
@@ -421,8 +419,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 // TestBlockManagerInvalidInterval tests that the block manager is able to
 // determine it is receiving corrupt checkpoints and filter headers.
 func TestBlockManagerInvalidInterval(t *testing.T) {
-	t.Parallel()
-
+	//t.Parallel()
 	type testCase struct {
 		// wrongGenesis indicates whether we should start deriving the
 		// filters from a wrong genesis.
@@ -486,7 +483,6 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			firstInvalid:    1,
 		},
 	}
-
 	for _, test := range testCases {
 		bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
 		if err != nil {

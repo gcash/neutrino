@@ -669,9 +669,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		var genesisFilterHash chainhash.Hash
 		switch filterType {
 		case RegularFilter:
-			basicFilter, err := builder.BuildBasicFilter(
-				netParams.GenesisBlock, nil,
-			)
+			basicFilter, err := builder.BuildBasicFilter(netParams.GenesisBlock)
 			if err != nil {
 				return nil, err
 			}

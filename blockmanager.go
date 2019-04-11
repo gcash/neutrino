@@ -17,7 +17,6 @@ import (
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
-	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
@@ -944,8 +943,13 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				log.Warnf("Banning peer=%v for invalid "+
 					"checkpoints", sp)
 
-				b.server.BanPeer(sp)
-				sp.Disconnect()
+				// Running this in a goroutine is a hack to get around
+				// a deadlock in the blockmanager_test while still banning
+				// and disconnecting the peer.
+				go func() {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}()
 				return false
 			}
 
@@ -1373,89 +1377,34 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 
 	badPeers := make(map[string]struct{})
 
-	blockHash := block.BlockHash()
-	filterKey := builder.DeriveKey(&blockHash)
-
 	log.Infof("Attempting to pinpoint mismatch in cfheaders for block=%v",
 		block.Header.BlockHash())
 
 	// Based on the type of filter, our verification algorithm will differ.
 	switch fType {
 
-	// With the current set of items that we can fetch from the p2p
-	// network, we're forced to only verify what we can at this point. So
-	// we'll just ensure that each of the filters returned
-	//
-	// TODO(roasbeef): update after BLOCK_WITH_PREV_OUTS is a thing
 	case wire.GCSFilterRegular:
+		// With the regular filter we can reconstruct the full
+		// filter from the block. If the peer didn't send us the
+		// exact same filter, they are misbehaving.
+		correctFilter, err := builder.BuildBasicFilter(block)
+		if err != nil {
+			return nil, err
+		}
+		correctBytes, err := correctFilter.NBytes()
+		if err != nil {
+			return nil, err
+		}
 
-		// We'll now run through each peer and ensure that each output
-		// script is included in the filter that they responded with to
-		// our query.
 		for peerAddr, filter := range filtersFromPeers {
-		peerVerification:
+			peerFilterBytes, err := filter.NBytes()
+			if err != nil {
+				badPeers[peerAddr] = struct{}{}
+				continue
+			}
 
-			// We'll ensure that all the filters include every
-			// output script within the block.
-			//
-			// TODO(roasbeef): eventually just do a comparison
-			// against decompressed filters
-			for i, tx := range block.Transactions {
-				for _, txOut := range tx.TxOut {
-					match := true
-					switch {
-					// If the script itself is blank, then
-					// we'll skip this as it doesn't
-					// contain any useful information.
-					case len(txOut.PkScript) == 0:
-						continue
-
-						// In order to allow the filters to later be committed
-						// to within an OP_RETURN output, we ignore all OP_RETURNs
-						// in the coinbase to avoid a circular dependency.
-					case i == 0 && txOut.PkScript[0] == txscript.OP_RETURN:
-						continue
-
-						// If this is a non-coinbase OP_RETURN output then add all
-						// the data elements in the script.
-					case txOut.PkScript[0] == txscript.OP_RETURN:
-						dataElements, err := txscript.ExtractDataElements(txOut.PkScript)
-						if err != nil {
-							continue
-						}
-						for _, elem := range dataElements {
-							matchElem, err := filter.Match(filterKey, elem)
-							if err != nil {
-								// If we're unable to query
-								// this filter, then we'll skip
-								// this peer all together.
-								continue peerVerification
-							}
-							if !matchElem {
-								match = false
-							}
-						}
-					default:
-						var err error
-						match, err = filter.Match(filterKey, txOut.PkScript)
-						if err != nil {
-							// If we're unable to query
-							// this filter, then we'll skip
-							// this peer all together.
-							continue peerVerification
-						}
-					}
-
-					if match {
-						continue
-					}
-
-					// If this filter doesn't match, then
-					// we'll mark this peer as bad and move
-					// on to the next peer.
-					badPeers[peerAddr] = struct{}{}
-					continue peerVerification
-				}
+			if !bytes.Equal(correctBytes, peerFilterBytes) {
+				badPeers[peerAddr] = struct{}{}
 			}
 		}
 

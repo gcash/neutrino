@@ -230,7 +230,12 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		ro.watchList = append(ro.watchList, script)
 	}
 	for _, input := range ro.watchInputs {
+		var buf bytes.Buffer
+		if err := input.OutPoint.Serialize(&buf); err != nil {
+			return err
+		}
 		ro.watchList = append(ro.watchList, input.PkScript)
+		ro.watchList = append(ro.watchList, buf.Bytes())
 	}
 
 	// Check that we have either an end block or a quit channel.
@@ -1013,7 +1018,12 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 		ro.watchList = append(ro.watchList, script)
 	}
 	for _, input := range update.inputs {
+		var buf bytes.Buffer
+		if err := input.OutPoint.Serialize(&buf); err != nil {
+			return false, err
+		}
 		ro.watchList = append(ro.watchList, input.PkScript)
+		ro.watchList = append(ro.watchList, buf.Bytes())
 	}
 	for _, txid := range update.txIDs {
 		ro.watchList = append(ro.watchList, txid[:])
@@ -1117,7 +1127,12 @@ txOutLoop:
 				PkScript: pkScript,
 				OutPoint: outPoint,
 			})
+			var buf bytes.Buffer
+			if err := outPoint.Serialize(&buf); err != nil {
+				return false, err
+			}
 			ro.watchList = append(ro.watchList, pkScript)
+			ro.watchList = append(ro.watchList, buf.Bytes())
 
 			continue txOutLoop
 		}
