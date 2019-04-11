@@ -725,7 +725,7 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 
 // putFilterToCache inserts a given filter in ChainService's FilterCache.
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
-	filterType filterdb.FilterType, filter *gcs.Filter) error {
+	filterType filterdb.FilterType, filter *gcs.Filter) (bool, error) {
 
 	cacheKey := cache.FilterCacheKey{BlockHash: *blockHash, FilterType: filterType}
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
@@ -868,7 +868,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	if filter != nil {
 		// If we found a filter, put it in the cache and persistToDisk if
 		// the caller requested it.
-		err := s.putFilterToCache(&blockHash, dbFilterType, filter)
+		_, err := s.putFilterToCache(&blockHash, dbFilterType, filter)
 		if err != nil {
 			log.Warnf("couldn't write filter to cache: %v", err)
 		}
@@ -1005,7 +1005,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Add block to the cache before returning it.
-	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
+	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
