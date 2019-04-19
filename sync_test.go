@@ -523,7 +523,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 
-	banPeer(harness.svc, harness.h2)
+	banPeer(t, harness.svc, harness.h2)
 	err = harness.svc.SendTransaction(authTx1.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
@@ -566,7 +566,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 
-	banPeer(harness.svc, harness.h2)
+	banPeer(t, harness.svc, harness.h2)
 	err = harness.svc.SendTransaction(authTx2.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
@@ -1472,13 +1472,25 @@ func checkRescanStatus() (int, int32, error) {
 
 // banPeer bans and disconnects the requested harness from the ChainService
 // instance for BanDuration seconds.
-func banPeer(svc *neutrino.ChainService, harness *rpctest.Harness) {
+func banPeer(t *testing.T, svc *neutrino.ChainService, harness *rpctest.Harness) {
+	t.Helper()
+
 	peers := svc.Peers()
 	for _, peer := range peers {
-		if peer.Addr() == harness.P2PAddress() {
-			svc.BanPeer(peer)
-			peer.Disconnect()
+		peerAddr := peer.Addr()
+		if peerAddr != harness.P2PAddress() {
+			continue
 		}
+
+		err := svc.BanPeer(peerAddr, banman.ExceededBanThreshold)
+		if err != nil {
+			if logLevel != btclog.LevelOff {
+				t.Fatalf("unable to ban peer %v: %v", peerAddr,
+					err)
+			}
+		}
+
+		peer.Disconnect()
 	}
 }
 
