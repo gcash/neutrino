@@ -352,8 +352,10 @@ func queryChainServiceBatch(
 			case <-timeout:
 				// We failed, so set the query state back to
 				// zero and update our lastFailed state.
-				atomic.StoreUint32(&queryStates[handleQuery],
-					uint32(queryWaitSubmit))
+				if atomic.LoadUint32(&queryStates[handleQuery]) != uint32(queryAnswered) {
+					atomic.StoreUint32(&queryStates[handleQuery],
+						uint32(queryWaitSubmit))
+				}
 
 				if !sp.Connected() {
 					return
@@ -368,6 +370,10 @@ func queryChainServiceBatch(
 					newLogClosure(func() string {
 						return spew.Sdump(queryMsgs[handleQuery])
 					}))
+
+				// Pause here to give the other peer goroutines a chance to select
+				// this query on their next iteration.
+				time.Sleep(time.Second * 2)
 
 			case <-matchSignal:
 				// We got a match signal so we can mark this
