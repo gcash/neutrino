@@ -5,9 +5,9 @@ package neutrino
 import (
 	"bytes"
 	"container/list"
+	"errors"
 	"fmt"
 	"github.com/gcash/neutrino/blockntfns"
-	"github.com/go-errors/errors"
 	"math"
 	"math/big"
 	"sync"
