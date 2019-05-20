@@ -9,6 +9,12 @@ import (
 	"github.com/gcash/bchd/wire"
 )
 
+// ErrHeaderNotFound is returned when a target header on disk (flat file) can't
+// be found.
+type ErrHeaderNotFound struct {
+	error
+}
+
 // appendRaw appends a new raw header to the end of the flat file.
 func (h *headerStore) appendRaw(header []byte) error {
 	_, err := h.file.Write(header)
@@ -41,7 +47,7 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 	// buffer.
 	rawHeader := make([]byte, headerSize)
 	if _, err := h.file.ReadAt(rawHeader[:], int64(seekDist)); err != nil {
-		return nil, err
+		return nil, &ErrHeaderNotFound{err}
 	}
 
 	return rawHeader[:], nil
