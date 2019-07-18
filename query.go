@@ -697,7 +697,7 @@ func queryChainServicePeers(
 	// required response has been found. This is done by closing the
 	// channel.
 	checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}),
+	quit chan<- struct{}),
 
 	// options takes functional options for executing the query.
 	options ...QueryOption) {
@@ -729,8 +729,9 @@ func queryChainServicePeers(
 	// Loop for any messages sent to us via our subscription channel and
 	// check them for whether they satisfy the query. Break the loop if
 	// it's time to quit.
-	peerTimeout := time.NewTicker(qo.timeout)
-	timeout := time.After(qo.peerConnectTimeout)
+	peerTimeout := time.NewTimer(qo.timeout)
+	connectionTimeout := time.NewTimer(qo.peerConnectTimeout)
+	connectionTicker := connectionTimeout.C
 	if queryPeer != nil {
 		peerTries[queryPeer.Addr()]++
 		queryPeer.subscribeRecvMsg(subscription)
@@ -739,7 +740,7 @@ func queryChainServicePeers(
 checkResponses:
 	for {
 		select {
-		case <-timeout:
+		case <-connectionTicker:
 			// When we time out, we're done.
 			if queryPeer != nil {
 				queryPeer.unsubscribeRecvMsgs(subscription)
@@ -760,17 +761,33 @@ checkResponses:
 			}
 			break checkResponses
 
-			// A message has arrived over the subscription channel, so we
-			// execute the checkResponses callback to see if this ends our
-			// query session.
+		// A message has arrived over the subscription channel, so we
+		// execute the checkResponses callback to see if this ends our
+		// query session.
 		case sm := <-msgChan:
 			// TODO: This will get stuck if checkResponse gets
 			// stuck. This is a caveat for callers that should be
 			// fixed before exposing this function for public use.
 			checkResponse(sm.sp, sm.msg, queryQuit)
 
-			// The current peer we're querying has failed to answer the
-			// query. Time to select a new peer and query it.
+			// Each time we receive a response from the current
+			// peer, we'll reset the main peer timeout as they're
+			// being responsive.
+			if !peerTimeout.Stop() {
+				<-peerTimeout.C
+			}
+			peerTimeout.Reset(qo.timeout)
+
+			// Also at this point, if the peerConnectTimeout is
+			// still active, then we can disable it, as we're
+			// receiving responses from the current peer.
+			if connectionTicker != nil && !connectionTimeout.Stop() {
+				<-connectionTimeout.C
+			}
+			connectionTicker = nil
+
+		// The current peer we're querying has failed to answer the
+		// query. Time to select a new peer and query it.
 		case <-peerTimeout.C:
 			if queryPeer != nil {
 				queryPeer.unsubscribeRecvMsgs(subscription)
