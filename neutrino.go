@@ -1181,10 +1181,7 @@ func (s *ChainService) peerHandler() {
 			s.nameResolver, func(addrs []*wire.NetAddress) {
 				var validAddrs []*wire.NetAddress
 				for _, addr := range addrs {
-					if addr.Services&RequiredServices !=
-						RequiredServices {
-						continue
-					}
+					addr.Services = RequiredServices
 
 					validAddrs = append(validAddrs, addr)
 				}
