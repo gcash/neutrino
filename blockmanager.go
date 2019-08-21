@@ -1294,7 +1294,7 @@ func (b *blockManager) resolveConflict(
 	// which ones are valid.
 	// TODO(halseth): check if peer serves headers that matches its checkpoints
 	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
-	headers := b.getCFHeadersForAllPeers(startHeight, fType)
+	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
 
 	// Make sure we're working off the same baseline. Otherwise, we want to
 	// go back and get checkpoints again.
@@ -1311,7 +1311,7 @@ func (b *blockManager) resolveConflict(
 	// For each header, go through and check whether all headers messages
 	// have the same filter hash. If we find a difference, get the block,
 	// calculate the filter, and throw out any mismatching peers.
-	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
+	for i := 0; i < numHeaders; i++ {
 		if checkForCFHeaderMismatch(headers, i) {
 			// Get the block header for this height, along with the
 			// block as well.
