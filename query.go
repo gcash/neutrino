@@ -4,11 +4,10 @@ package neutrino
 
 import (
 	"fmt"
+	"github.com/davecgh/go-spew/spew"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/davecgh/go-spew/spew"
 
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
@@ -26,9 +25,8 @@ var (
 	// query.
 	QueryTimeout = time.Second * 10
 
-	// QueryBatchTimout is the total time we'll wait for a batch fetch
+	// QueryBatchTimeout is the total time we'll wait for a batch fetch
 	// query to complete.
-	// TODO(halseth): instead use timeout since last received response?
 	QueryBatchTimeout = time.Second * 30
 
 	// QueryPeerCooldown is the time we'll wait before re-assigning a query
@@ -272,8 +270,7 @@ func queryChainServiceBatch(
 
 	// checkResponse is called for every received message to see if it
 	// answers the query message. It should return true if so.
-	checkResponse func(sp *ServerPeer, query wire.Message,
-		resp wire.Message) bool,
+	checkResponse func(sp *ServerPeer, query wire.Message, resp wire.Message) bool,
 
 	// queryQuit forces the query to end before it's complete.
 	queryQuit <-chan struct{},
@@ -390,11 +387,6 @@ func queryChainServiceBatch(
 				// The query is now marked as in-process. We
 				// begin to process it.
 				handleQuery = i
-
-				// We have a query we're working on.
-				mtxPeerStates.Lock()
-				peerStates[sp.Addr()] = queryMsgs[handleQuery]
-				mtxPeerStates.Unlock()
 				sp.QueueMessageWithEncoding(queryMsgs[i],
 					nil, qo.encoding)
 				break
@@ -723,7 +715,7 @@ func queryChainServicePeers(
 	// required response has been found. This is done by closing the
 	// channel.
 	checkResponse func(sp *ServerPeer, resp wire.Message,
-	quit chan<- struct{}),
+		quit chan<- struct{}),
 
 	// options takes functional options for executing the query.
 	options ...QueryOption) {
@@ -1371,7 +1363,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Add block to the cache before returning it.
-	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}

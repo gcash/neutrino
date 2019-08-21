@@ -959,8 +959,7 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 
 	ipNet, err := banman.ParseIPNet(addr, nil)
 	if err != nil {
-		return fmt.Errorf("unable to parse IP network for peer %v: %v",
-			addr, err)
+		return fmt.Errorf("unable to parse IP network for peer %v: %v", addr, err)
 	}
 	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
 }
@@ -982,8 +981,7 @@ func (s *ChainService) IsBanned(addr string) bool {
 
 	// Log how much time left the peer will remain banned for, if any.
 	if time.Now().Before(banStatus.Expiration) {
-		log.Debugf("Peer %v is banned for another %v", addr,
-			banStatus.Expiration.Sub(time.Now()))
+		log.Debugf("Peer %v is banned for another %v", addr, time.Until(banStatus.Expiration))
 	}
 
 	return banStatus.Banned

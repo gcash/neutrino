@@ -129,7 +129,7 @@ var (
 	missingElementFilter, _ = builder.BuildBasicFilter(
 		&wire.MsgBlock{
 			Transactions: block.Transactions[1:],
-		}, nil,
+		},
 	)
 
 	fakeFilter1, _ = gcs.FromBytes(2, builder.DefaultP, builder.DefaultM, []byte{

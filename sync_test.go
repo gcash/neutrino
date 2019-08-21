@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"github.com/gcash/neutrino/banman"
 	"io"
 	"io/ioutil"
 	"os"
@@ -1484,7 +1485,7 @@ func banPeer(t *testing.T, svc *neutrino.ChainService, harness *rpctest.Harness)
 
 		err := svc.BanPeer(peerAddr, banman.ExceededBanThreshold)
 		if err != nil {
-			if logLevel != btclog.LevelOff {
+			if logLevel != bchlog.LevelOff {
 				t.Fatalf("unable to ban peer %v: %v", peerAddr,
 					err)
 			}
