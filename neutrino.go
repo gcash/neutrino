@@ -1377,6 +1377,12 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		s.firstPeerConnect = nil
 	}
 
+	// Update the address' last seen time if the peer has acknowledged our
+	// version and has sent us its version as well.
+	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
+		s.addrManager.Connected(sp.NA())
+	}
+
 	return true
 }
 
@@ -1410,12 +1416,6 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		} else {
 			s.connManager.Disconnect(sp.connReq.ID())
 		}
-	}
-
-	// Update the address' last seen time if the peer has acknowledged
-	// our version and has sent us its version as well.
-	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
-		s.addrManager.Connected(sp.NA())
 	}
 
 	// If we get here it means that either we didn't know about the peer
