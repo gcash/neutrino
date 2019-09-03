@@ -228,13 +228,13 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 	// NotificationsSinceHeight should then return notifications for blocks
 	// 11-20.
 	const chainTip uint32 = 20
-	subCurrentHeight := uint32(chainTip / 2)
+	subCurrentHeight := chainTip / 2
 	numBacklog := chainTip - subCurrentHeight
 	blockSource.blocksSinceHeight = func(uint32) ([]blockntfns.BlockNtfn,
 		uint32, error) {
 
 		blocks := make([]blockntfns.BlockNtfn, 0, numBacklog)
-		for i := uint32(subCurrentHeight + 1); i <= chainTip; i++ {
+		for i := subCurrentHeight + 1; i <= chainTip; i++ {
 			blocks = append(blocks, blockntfns.NewBlockConnected(
 				emptyHeader, i,
 			))

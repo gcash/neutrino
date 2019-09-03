@@ -38,12 +38,12 @@ type checkCFHTestCase struct {
 	mismatch bool
 }
 
-type resolveCFHTestCase struct {
-	name        string
-	block       *wire.MsgBlock
-	idx         int
-	peerFilters map[string]*gcs.Filter
-	badPeers    []string
+type resolveFilterTestCase struct {
+	name         string
+	block        *wire.MsgBlock
+	banThreshold int
+	peerFilters  map[string]*gcs.Filter
+	badPeers     []string
 }
 
 var (
@@ -124,6 +124,13 @@ var (
 		},
 	}
 	correctFilter, _ = builder.BuildBasicFilter(block)
+
+	// a filter missing the first output of the block.
+	missingElementFilter, _ = builder.BuildBasicFilter(
+		&wire.MsgBlock{
+			Transactions: block.Transactions[1:],
+		},
+	)
 
 	fakeFilter1, _ = gcs.FromBytes(2, builder.DefaultP, builder.DefaultM, []byte{
 		0x30, 0x43, 0x02, 0x1f, 0x4d, 0x23, 0x81, 0xdc,
@@ -332,7 +339,7 @@ var (
 		},
 	}
 
-	resolveCFHTestCases = []*resolveCFHTestCase{
+	resolveFilterTestCases = []*resolveFilterTestCase{
 		{
 			name:  "all bad 1",
 			block: block,
@@ -340,8 +347,8 @@ var (
 				"a": fakeFilter1,
 				"b": fakeFilter1,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 2",
@@ -350,8 +357,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 3",
@@ -360,8 +367,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 4",
@@ -370,8 +377,8 @@ var (
 				"a": fakeFilter1,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 5",
@@ -380,8 +387,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter1,
 			},
-			idx:      1,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "one good",
@@ -391,8 +398,8 @@ var (
 				"b": fakeFilter1,
 				"c": fakeFilter2,
 			},
-			idx:      1,
-			badPeers: []string{"b", "c"},
+			banThreshold: 1,
+			badPeers:     []string{"b", "c"},
 		},
 		{
 			name:  "all good",
@@ -401,8 +408,21 @@ var (
 				"a": correctFilter,
 				"b": correctFilter,
 			},
-			idx:      1,
-			badPeers: []string{},
+			banThreshold: 1,
+			badPeers:     []string{},
+		},
+		{
+			// One peer is serving a filter tha lacks an element,
+			// we should immediately notice this and ban it.
+			name:  "filter missing element",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": missingElementFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
 		},
 	}
 )
@@ -433,7 +453,8 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 	}
 
 	cfStore, err := headerfs.NewFilterHeaderStore(
-		tempDir, db, headerfs.RegularFilter, &chaincfg.SimNetParams,
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
 	)
 	if err != nil {
 		t.Fatalf("Error creating filter header store: %s", err)
@@ -545,13 +566,14 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 	}
 }
 
-func TestResolveCFHeadersMismatch(t *testing.T) {
+func TestResolveFilterMismatchFromBlock(t *testing.T) {
 	t.Parallel()
 
-	for _, testCase := range resolveCFHTestCases {
+	for _, testCase := range resolveFilterTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			badPeers, err := resolveCFHeaderMismatch(
+			badPeers, err := resolveFilterMismatchFromBlock(
 				block, wire.GCSFilterRegular, testCase.peerFilters,
+				testCase.banThreshold,
 			)
 			if err != nil {
 				t.Fatalf("Couldn't resolve cfheader "+

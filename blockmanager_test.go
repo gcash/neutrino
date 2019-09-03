@@ -3,9 +3,14 @@ package neutrino
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/gcash/bchd/peer"
+	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/neutrino/banman"
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gcash/bchd/chaincfg"
@@ -17,8 +22,11 @@ import (
 	"github.com/gcash/neutrino/headerfs"
 )
 
-// maxHeight is the height we will generate filter headers up to.
-const maxHeight = 20 * uint32(wire.CFCheckptInterval)
+// maxHeight is the height we will generate filter headers up to. We use an odd
+// number of checkpoints to ensure we can test cases where the block manager is
+// only able to fetch filter headers for one checkpoint interval rather than
+// two.
+const maxHeight = 21 * uint32(wire.CFCheckptInterval)
 
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
@@ -38,28 +46,35 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			err)
 	}
 
+	cleanUp := func() {
+		db.Close()
+		os.RemoveAll(tempDir)
+	}
+
 	hdrStore, err := headerfs.NewBlockHeaderStore(
 		tempDir, db, &chaincfg.SimNetParams,
 	)
 	if err != nil {
-		db.Close()
+		cleanUp()
 		return nil, nil, nil, nil, fmt.Errorf("Error creating block "+
 			"header store: %s", err)
 	}
 
-	cleanUp := func() {
-		defer os.RemoveAll(tempDir)
-		defer db.Close()
-	}
-
 	cfStore, err := headerfs.NewFilterHeaderStore(
-		tempDir, db, headerfs.RegularFilter,
-		&chaincfg.SimNetParams,
+		tempDir, db, headerfs.RegularFilter, &chaincfg.SimNetParams,
+		nil,
 	)
 	if err != nil {
 		cleanUp()
 		return nil, nil, nil, nil, fmt.Errorf("Error creating filter "+
 			"header store: %s", err)
+	}
+
+	banStore, err := banman.NewStore(db)
+	if err != nil {
+		cleanUp()
+		return nil, nil, nil, nil, fmt.Errorf("unable to initialize "+
+			"ban store: %v", err)
 	}
 
 	// Set up a chain service for the block manager. Each test should set
@@ -68,6 +83,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 		chainParams:      chaincfg.SimNetParams,
 		BlockHeaders:     hdrStore,
 		RegFilterHeaders: cfStore,
+		banStore:         banStore,
 	}
 
 	// Set up a blockManager with the chain service we defined.
@@ -438,7 +454,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		// before starting the test.
 		partialInterval bool
 
-		// firstInvalid is the first interval we expect the
+		// firstInvalid is the first interval response we expect the
 		// blockmanager to determine is invalid.
 		firstInvalid int
 	}
@@ -454,30 +470,30 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// With checkpoints calculated from the wrong genesis, and a
 		// partial set of filter headers already written, the first
-		// interval should be considered invalid.
+		// interval response should be considered invalid.
 		{
 			wrongGenesis:    true,
 			partialInterval: true,
 			firstInvalid:    0,
 		},
 
-		// With intervals not lining up, the second interval should
-		// be determined invalid.
+		// With intervals not lining up, the second interval response
+		// should be determined invalid.
 		{
 			intervalMisaligned: true,
-			firstInvalid:       1,
+			firstInvalid:       0,
 		},
 
 		// With misaligned intervals and a partial interval written, the
-		// second interval should be considered invalid.
+		// second interval response should be considered invalid.
 		{
 			intervalMisaligned: true,
 			partialInterval:    true,
-			firstInvalid:       1,
+			firstInvalid:       0,
 		},
 
 		// With responses having invalid prev hashes, the second
-		// interval should be deemed invalid.
+		// interval response should be deemed invalid.
 		{
 			invalidPrevHash: true,
 			firstInvalid:    1,
@@ -489,6 +505,16 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			t.Fatalf("unable to set up ChainService: %v", err)
 		}
 		defer cleanUp()
+
+		// Create a mock peer to prevent panics when attempting to ban
+		// a peer that served an invalid filter header.
+		mockPeer := newServerPeer(bm.server, false)
+		mockPeer.Peer, err = peer.NewOutboundPeer(
+			newPeerConfig(mockPeer), "127.0.0.1:8333",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Keep track of the filter headers and block headers. Since
 		// the genesis headers are written automatically when the store
@@ -581,7 +607,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			// Check that the success of the callback match what we
 			// expect.
 			for i := range responses {
-				success := f(nil, msgs[i], responses[i])
+				success := f(mockPeer, msgs[i], responses[i])
 				if i == test.firstInvalid {
 					if success {
 						t.Fatalf("expected interval "+
@@ -618,5 +644,212 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		bm.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
+	}
+}
+
+// buildNonPushScriptFilter creates a CFilter with all output scripts except all
+// OP_RETURNS with push-only scripts.
+//
+// NOTE: this is not a valid filter, only for tests.
+func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+	blockHash := block.BlockHash()
+	b := builder.WithKeyHash(&blockHash)
+
+	for _, tx := range block.Transactions {
+		for _, txOut := range tx.TxOut {
+			// The old version of BIP-158 skipped OP_RETURNs that
+			// had a push-only script.
+			if txOut.PkScript[0] == txscript.OP_RETURN &&
+				txscript.IsPushOnlyScript(txOut.PkScript[1:]) {
+				continue
+			}
+
+			b.AddEntry(txOut.PkScript)
+		}
+	}
+
+	return b.Build()
+}
+
+// buildAllPkScriptsFilter creates a CFilter with all output scripts, including
+// OP_RETURNS.
+//
+// NOTE: this is not a valid filter, only for tests.
+func buildAllPkScriptsFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+	blockHash := block.BlockHash()
+	b := builder.WithKeyHash(&blockHash)
+
+	for _, tx := range block.Transactions {
+		for _, txOut := range tx.TxOut {
+			// An old version of BIP-158 included all output
+			// scripts.
+			b.AddEntry(txOut.PkScript)
+		}
+	}
+
+	return b.Build()
+}
+
+func assertBadPeers(expBad map[string]struct{}, badPeers []string) error {
+	remBad := make(map[string]struct{})
+	for p := range expBad {
+		remBad[p] = struct{}{}
+	}
+	for _, peer := range badPeers {
+		_, ok := remBad[peer]
+		if !ok {
+			return fmt.Errorf("did not expect %v to be bad", peer)
+		}
+		delete(remBad, peer)
+	}
+
+	if len(remBad) != 0 {
+		return fmt.Errorf("did expect more bad peers")
+	}
+
+	return nil
+}
+
+type mockQueryAccess struct {
+	answers map[string]wire.Message
+}
+
+func (m *mockQueryAccess) queryAllPeers(
+	queryMsg wire.Message,
+	checkResponse func(sp *ServerPeer, resp wire.Message,
+		quit chan<- struct{}, peerQuit chan<- struct{}),
+	options ...QueryOption) {
+
+	for p, resp := range m.answers {
+		pp, err := peer.NewOutboundPeer(&peer.Config{}, p)
+		if err != nil {
+			panic(err)
+		}
+
+		sp := &ServerPeer{
+			Peer: pp,
+		}
+		checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
+	}
+}
+
+var _ QueryAccess = (*mockQueryAccess)(nil)
+
+// TestBlockManagerDetectBadPeers checks that we detect bad peers, like peers
+// not responding to our filter query, serving inconsistent filters etc.
+func TestBlockManagerDetectBadPeers(t *testing.T) {
+	t.Parallel()
+
+	var (
+		stopHash        = chainhash.Hash{}
+		prev            = chainhash.Hash{}
+		startHeight     = uint32(100)
+		badIndex        = uint32(5)
+		targetIndex     = startHeight + badIndex
+		fType           = wire.GCSFilterRegular
+		filterBytes, _  = correctFilter.NBytes()
+		filterHash, _   = builder.GetFilterHash(correctFilter)
+		blockHeader     = wire.BlockHeader{}
+		targetBlockHash = block.BlockHash()
+
+		peers  = []string{"good1:1", "good2:1", "bad:1", "good3:1"}
+		expBad = map[string]struct{}{
+			"bad:1": {},
+		}
+	)
+
+	testCases := []struct {
+		// filterAnswers is used by each testcase to set the anwers we
+		// want each peer to respond with on filter queries.
+		filterAnswers func(string, map[string]wire.Message)
+	}{
+		{
+			// We let the "bad" peers not respond to the filter
+			// query. They should be marked bad because they are
+			// unresponsive. We do this to ensure peers cannot
+			// only respond to us with headers, and stall our sync
+			// by not responding to filter requests.
+			filterAnswers: func(p string,
+				answers map[string]wire.Message) {
+
+				if strings.Contains(p, "bad") {
+					return
+				}
+
+				answers[p] = wire.NewMsgCFilter(
+					fType, &targetBlockHash, filterBytes,
+				)
+			},
+		},
+		{
+			// We let the "bad" peers serve filters that don't hash
+			// to the filter headers they have sent.
+			filterAnswers: func(p string,
+				answers map[string]wire.Message) {
+
+				filterData := filterBytes
+				if strings.Contains(p, "bad") {
+					filterData, _ = fakeFilter1.NBytes()
+				}
+
+				answers[p] = wire.NewMsgCFilter(
+					fType, &targetBlockHash, filterData,
+				)
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		// Create a mock block header store. We only need to be able to
+		// serve a header for the target index.
+		blockHeaders := newMockBlockHeaderStore()
+		blockHeaders.heights[targetIndex] = blockHeader
+		cs := &ChainService{
+			BlockHeaders: blockHeaders,
+		}
+
+		// We set up the mock QueryAccess to only respond according to
+		// the active testcase.
+		mock := &mockQueryAccess{
+			answers: make(map[string]wire.Message),
+		}
+		for _, peer := range peers {
+			test.filterAnswers(peer, mock.answers)
+		}
+
+		// For the CFHeaders, we pretend all peers responded with the same
+		// filter headers.
+		msg := &wire.MsgCFHeaders{
+			FilterType:       fType,
+			StopHash:         stopHash,
+			PrevFilterHeader: prev,
+		}
+
+		for i := uint32(0); i < 2*badIndex; i++ {
+			msg.AddCFHash(&filterHash)
+		}
+
+		headers := make(map[string]*wire.MsgCFHeaders)
+		for _, peer := range peers {
+			headers[peer] = msg
+		}
+
+		bm := &blockManager{
+			server:  cs,
+			queries: mock,
+		}
+
+		// Now trying to detect which peers are bad, we should detect the
+		// bad ones.
+		badPeers, err := bm.detectBadPeers(
+			headers, targetIndex, badIndex, fType,
+		)
+		if err != nil {
+			t.Fatalf("failed to detect bad peers: %v", err)
+		}
+
+		if err := assertBadPeers(expBad, badPeers); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
