@@ -12,6 +12,7 @@ import (
 	"github.com/gcash/neutrino/chainsync"
 	"math"
 	"math/big"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,10 @@ const (
 	// maxCFCheckptsPerQuery is the maximum number of filter header
 	// checkpoints we can query for within a single message over the wire.
 	maxCFCheckptsPerQuery = wire.MaxCFHeadersPerMsg / wire.CFCheckptInterval
+
+	// defaultRelayMetric is the default probability of relaying a transaction
+	// per block.
+	defaultRelayMetric = 50
 )
 
 // filterStoreLookup
@@ -207,6 +212,8 @@ type blockManager struct {
 	blocksPerRetarget   int32 // target timespan / target time per block
 
 	requestedTxns map[chainhash.Hash]struct{}
+	relayMetric   int
+	relayRand     *rand.Rand
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -240,6 +247,8 @@ func newBlockManager(s *ChainService,
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
 		requestedTxns:       make(map[chainhash.Hash]struct{}),
+		relayMetric:         defaultRelayMetric,
+		relayRand:           rand.New(rand.NewSource(time.Now().UnixNano())),
 		firstPeerSignal:     firstPeerSignal,
 	}
 
@@ -2195,6 +2204,27 @@ func (b *blockManager) handleTxMsg(tmsg *txMsg) {
 	}
 	b.server.mempool.AddTransaction(tmsg.tx)
 	delete(b.requestedTxns, *txHash)
+
+	// We want to decide whether or not to relay this transaction. We want to relay
+	// for privacy reasons to make it so the remote peer cannot tell if the transaction
+	// is ours or a tx that we are relaying. The downside here is the transactions
+	// are not validated so we might be relaying an invalid transaction. Currently bchd
+	// nodes do not ban peers which relay invalid transactions, however we still do not
+	// want to cause an amplification attack. So our criteria for relaying is we relay
+	// with an exponential decaying probability.
+
+	if b.randomRelay() && b.server.shouldRelayTx(tmsg.tx.MsgTx()) {
+		if err := b.server.sendTransaction(tmsg.tx.MsgTx()); err != nil {
+			log.Errorf("Relay of mempool tx error: %v", err)
+		}
+
+		b.relayMetric *= 2
+	}
+}
+
+// randomRelay returns true with a 1 / relayMetric probability.
+func (b *blockManager) randomRelay() bool {
+	return b.relayRand.Intn(b.relayMetric) == 0
 }
 
 // QueueHeaders adds the passed headers message and peer to the block handling
@@ -2558,6 +2588,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// Clear the mempool to free up memory. This may mean we might receive
 	// transactions we've previously downloaded but this is rather unlikely.
 	b.server.mempool.Clear()
+
+	// Reset the relay metric.
+	b.relayMetric = defaultRelayMetric
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.

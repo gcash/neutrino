@@ -576,6 +576,12 @@ type Config struct {
 	// Proxy is an address to use to connect remote peers using the socks5 proxy.
 	Proxy string
 
+	// ShouldRelayTx is an optional function that can be provided to narrow
+	// the range of transactions that will be relayed to the remote peer. For
+	// example, if you only make p2pkh txs you might only want to relay p2pkh txs.
+	// The default, if this is nil, will only relay 2 output p2pkh txs.
+	ShouldRelayTx func(tx *wire.MsgTx) bool
+
 	// AssertFilterHeader is an optional field that allows the creator of
 	// the ChainService to ensure that if any chain data exists, it's
 	// compliant with the expected filter header state. If neutrino starts
@@ -639,6 +645,8 @@ type ChainService struct {
 
 	blocksOnly bool
 
+	shouldRelayTx func(tx *wire.MsgTx) bool
+
 	mempool *Mempool
 
 	proxy string
@@ -673,6 +681,25 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		nameResolver = net.LookupIP
 	}
 
+	if cfg.ShouldRelayTx == nil {
+		cfg.ShouldRelayTx = func(tx *wire.MsgTx) bool {
+			if len(tx.TxOut) != 2 {
+				return false
+			}
+
+			for _, out := range tx.TxOut {
+				class, _, _, err := txscript.ExtractPkScriptAddrs(out.PkScript, &cfg.ChainParams)
+				if err != nil {
+					return false
+				}
+				if class != txscript.PubKeyHashTy {
+					return false
+				}
+			}
+			return true
+		}
+	}
+
 	// When creating the addr manager, we'll check to see if the user has
 	// provided their own resolution function. If so, then we'll use that
 	// instead as this may be proxying requests over an anonymizing
@@ -695,6 +722,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		nameResolver:      nameResolver,
 		dialer:            dialer,
 		blocksOnly:        cfg.BlocksOnly,
+		shouldRelayTx:     cfg.ShouldRelayTx,
 		mempool:           NewMempool(),
 		proxy:             cfg.Proxy,
 	}
