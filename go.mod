@@ -8,7 +8,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/gcash/bchd v0.14.8-0.20190821045443-25c2c6011866
 	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
-	github.com/gcash/bchutil v0.0.0-20190820203440-293bde359bbb
+	github.com/gcash/bchutil v0.0.0-20191012211144-98e73ec336ba
 	github.com/gcash/bchwallet v0.8.1
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/onsi/ginkgo v1.7.0 // indirect
