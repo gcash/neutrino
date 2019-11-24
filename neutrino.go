@@ -540,6 +540,12 @@ type Config struct {
 	// Proxy is an address to use to connect remote peers using the socks5 proxy.
 	Proxy string
 
+	// PersistToDisk indicates whether the filter should also be written
+	// to disk in addition to the memory cache. For "normal" wallets, they'll
+	// almost never need to re-match a filter once it's been fetched unless
+	// they're doing something like a key import.
+	PersistToDisk bool
+
 	// AssertFilterHeader is an optional field that allows the creator of
 	// the ChainService to ensure that if any chain data exists, it's
 	// compliant with the expected filter header state. If neutrino starts
@@ -570,6 +576,7 @@ type ChainService struct {
 	FilterDB         filterdb.FilterDatabase
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
+	persistToDisk    bool
 
 	FilterCache *lru.Cache
 	BlockCache  *lru.Cache
@@ -678,6 +685,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		blocksOnly:        cfg.BlocksOnly,
 		mempool:           NewMempool(),
 		proxy:             cfg.Proxy,
+		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
 
