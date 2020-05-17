@@ -12,4 +12,4 @@ before_install:
 
 script:
   - export PATH=$PATH:$HOME/gopath/bin
-  - ./goclean.sh
+  - travis_wait 30 ./goclean.sh
