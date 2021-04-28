@@ -6,11 +6,6 @@ package neutrino
 import (
 	"errors"
 	"fmt"
-	"github.com/gcash/bchd/btcjson"
-	"github.com/gcash/bchd/txscript"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
-	"github.com/gcash/neutrino/banman"
 	"net"
 	"strconv"
 	"sync"
@@ -19,14 +14,19 @@ import (
 
 	"github.com/gcash/bchd/addrmgr"
 	"github.com/gcash/bchd/blockchain"
+	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/peer"
+	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
+	"github.com/gcash/neutrino/banman"
 	"github.com/gcash/neutrino/blockntfns"
 	"github.com/gcash/neutrino/cache/lru"
 	"github.com/gcash/neutrino/filterdb"
@@ -582,6 +582,16 @@ type Config struct {
 	// up and this filter header state has diverged, then it'll remove the
 	// current on disk filter headers to sync them anew.
 	AssertFilterHeader *headerfs.FilterHeader
+
+	// BroadcastTimeout is the amount of time we'll wait before giving up on
+	// a transaction broadcast attempt. Broadcasting transactions consists
+	// of three steps:
+	//
+	// 1. Neutrino sends an inv for the transaction.
+	// 2. The recipient node determines if the inv is known, and if it's
+	//    not, replies with a getdata message.
+	// 3. Neutrino sends the raw transaction.
+	BroadcastTimeout time.Duration
 }
 
 // ChainService is instantiated with functional options
@@ -642,12 +652,19 @@ type ChainService struct {
 	mempool *Mempool
 
 	proxy string
+
+	broadcastTimeout time.Duration
 }
 
 // NewChainService returns a new chain service configured to connect to the
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	// Use the default broadcast timeout if one isn't provided.
+	if cfg.BroadcastTimeout == 0 {
+		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout
+	}
+
 	// First, we'll sort out the methods that we'll use to established
 	// outbound TCP connections, as well as perform any DNS queries.
 	//
@@ -697,6 +714,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		blocksOnly:        cfg.BlocksOnly,
 		mempool:           NewMempool(),
 		proxy:             cfg.Proxy,
+		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
 
 	// We set the queryPeers method to point to queryChainServicePeers,

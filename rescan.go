@@ -6,12 +6,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/gcash/bchd/chaincfg"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gcash/bchd/btcjson"
+	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/rpcclient"
 	"github.com/gcash/bchd/txscript"
