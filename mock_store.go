@@ -3,12 +3,13 @@ package neutrino
 import (
 	"fmt"
 
+	"time"
+
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/neutrino/headerfs"
-	"time"
 )
 
 // mockBlockHeaderStore is an implementation of the BlockHeaderStore backed by
