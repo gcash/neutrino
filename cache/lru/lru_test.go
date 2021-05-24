@@ -220,7 +220,8 @@ func TestConcurrencySimple(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 		}(i)
 	}
@@ -231,7 +232,8 @@ func TestConcurrencySimple(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Get(i)
 			if err != nil && err != cache.ErrElementNotFound {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 		}(i)
 	}
@@ -254,7 +256,8 @@ func TestConcurrencySmallCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 		}(i)
 	}
@@ -265,7 +268,8 @@ func TestConcurrencySmallCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Get(i)
 			if err != nil && err != cache.ErrElementNotFound {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 		}(i)
 	}
@@ -288,7 +292,8 @@ func TestConcurrencyBigCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 		}(i)
 	}
@@ -299,7 +304,8 @@ func TestConcurrencyBigCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Get(i)
 			if err != nil && err != cache.ErrElementNotFound {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 		}(i)
 	}

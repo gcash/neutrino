@@ -7,14 +7,15 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
-	"github.com/gcash/neutrino/banman"
-	"github.com/gcash/neutrino/blockntfns"
-	"github.com/gcash/neutrino/chainsync"
 	"math"
 	"math/big"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gcash/neutrino/banman"
+	"github.com/gcash/neutrino/blockntfns"
+	"github.com/gcash/neutrino/chainsync"
 
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg"
@@ -47,6 +48,23 @@ const (
 	// maxCFCheckptsPerQuery is the maximum number of filter header
 	// checkpoints we can query for within a single message over the wire.
 	maxCFCheckptsPerQuery = wire.MaxCFHeadersPerMsg / wire.CFCheckptInterval
+
+	// difficultyAdjustmentWindow is the size of the window used by the DAA adjustment
+	// algorithm when calculating the current difficulty. The algorithm requires fetching
+	// a 'suitable' block out of blocks n-144, n-145, and n-146. We set this value equal
+	// to n-144 as that is the first of the three candidate blocks and we will use it
+	// to fetch the previous two.
+	difficultyAdjustmentWindow = 144
+
+	// idealBlockTime is used by the Asert difficulty adjustment algorithm. It equals
+	// 10 minutes between blocks.
+	idealBlockTime = 600
+
+	// radix is used by the Asert difficulty adjustment algorithm.
+	radix = 65536
+
+	// rbits is the number of bits after the radix for fixed-point math
+	rbits = 16
 )
 
 // filterStoreLookup
@@ -2590,8 +2608,10 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 func (b *blockManager) selectDifficultyAdjustmentAlgorithm(height int32) blockchain.DifficultyAlgorithm {
 	if height > b.server.chainParams.UahfForkHeight && height <= b.server.chainParams.DaaForkHeight {
 		return blockchain.DifficultyEDA
-	} else if height > b.server.chainParams.DaaForkHeight {
+	} else if height > b.server.chainParams.DaaForkHeight && height <= b.server.chainParams.AxionActivationHeight {
 		return blockchain.DifficultyDAA
+	} else if height > b.server.chainParams.AxionActivationHeight {
+		return blockchain.DifficultyAsert
 	}
 	return blockchain.DifficultyLegacy
 }
@@ -2637,13 +2657,93 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 		return b.server.chainParams.PowLimitBits, nil
 	}
 
-	algorithm := b.selectDifficultyAdjustmentAlgorithm(lastNode.Height + 1)
-
-	// If we're still using a legacy algorithm
-	if algorithm != blockchain.DifficultyDAA {
-		return b.calcLegacyRequiredDifficulty(newBlockTime, reorgAttempt, algorithm)
+	// If regest or simnet we don't adjust the difficulty
+	if b.server.chainParams.NoDifficultyAdjustment {
+		return lastNode.Header.Bits, nil
 	}
 
+	algorithm := b.selectDifficultyAdjustmentAlgorithm(lastNode.Height + 1)
+
+	switch algorithm {
+	case blockchain.DifficultyLegacy, blockchain.DifficultyEDA:
+		return b.calcLegacyRequiredDifficulty(lastNode, newBlockTime, hList, algorithm)
+	case blockchain.DifficultyDAA:
+		return b.calcDAARequiredDifficulty(lastNode, newBlockTime)
+	case blockchain.DifficultyAsert:
+		return b.calcAsertRequiredDifficulty(lastNode,
+			b.server.chainParams.AsertDifficultyAnchorHeight,
+			b.server.chainParams.AsertDifficultyAnchorParentTimestamp,
+			b.server.chainParams.AsertDifficultyAnchorBits,
+			newBlockTime)
+	}
+	return 0, errors.New("unknown difficulty algorithm")
+}
+
+func (b *blockManager) calcAsertRequiredDifficulty(lastNode *headerlist.Node, anchorBlockHeight int32, anchorBlockTime int64, anchorBlockBits uint32, newBlockTime time.Time) (uint32, error) {
+	// For networks that support it, allow special reduction of the
+	// required difficulty once too much time has elapsed without
+	// mining a block.
+	if b.server.chainParams.ReduceMinDifficulty {
+		// Return minimum difficulty when more than the desired
+		// amount of time has elapsed without mining a block.
+		reductionTime := int64(b.server.chainParams.MinDiffReductionTime /
+			time.Second)
+		allowMinTime := lastNode.Header.Timestamp.Unix() + reductionTime
+		if newBlockTime.Unix() > allowMinTime {
+			return b.server.chainParams.PowLimitBits, nil
+		}
+	}
+
+	target := blockchain.CompactToBig(b.server.chainParams.AsertDifficultyAnchorBits)
+
+	tDelta := lastNode.Header.Timestamp.Unix() - b.server.chainParams.AsertDifficultyAnchorParentTimestamp
+	hDelta := lastNode.Height - b.server.chainParams.AsertDifficultyAnchorHeight
+	bigRadix := big.NewInt(radix)
+
+	// exponent = int(((time_diff - IDEAL_BLOCK_TIME * (height_diff + 1)) * RADIX) / HALFLIFE)
+	exponent := new(big.Int).Sub(big.NewInt(tDelta), new(big.Int).Mul(big.NewInt(int64(idealBlockTime)), new(big.Int).Add(big.NewInt(int64(hDelta)), big.NewInt(1))))
+	exponent.Mul(exponent, bigRadix)
+	exponent.Quo(exponent, big.NewInt(b.server.chainParams.AsertDifficultyHalflife))
+
+	// shifts = exponent >> RBITS
+	shifts := new(big.Int).Rsh(exponent, rbits)
+
+	// exponent -= shifts * RADIX
+	exponent.Sub(exponent, new(big.Int).Mul(shifts, bigRadix))
+
+	//  target *= RADIX + ((195766423245049 * exponent + 971821376 * exponent**2 + 5127 * exponent**3 + 2**47) >> (RBITS * 3))
+	factor := new(big.Int).Mul(big.NewInt(195766423245049), exponent)
+	factor.Add(factor, new(big.Int).Mul(big.NewInt(971821376), new(big.Int).Exp(exponent, big.NewInt(2), nil)))
+	factor.Add(factor, new(big.Int).Mul(big.NewInt(5127), new(big.Int).Exp(exponent, big.NewInt(3), nil)))
+	factor.Add(factor, new(big.Int).Exp(big.NewInt(2), big.NewInt(47), nil))
+	factor.Rsh(factor, rbits*3)
+
+	target.Mul(target, new(big.Int).Add(bigRadix, factor))
+
+	// if shifts < 0: target >>= -shifts else: target <<= shifts
+	if shifts.Cmp(big.NewInt(0)) < 0 {
+		target = target.Rsh(target, uint(-shifts.Int64()))
+	} else {
+		target = target.Lsh(target, uint(shifts.Int64()))
+	}
+
+	// target >>= RBITS
+	target.Rsh(target, rbits)
+
+	// If target is zero
+	if target.Cmp(big.NewInt(0)) == 0 {
+		return blockchain.BigToCompact(big.NewInt(1)), nil
+	}
+
+	if target.Cmp(b.server.chainParams.PowLimit) > 0 {
+		// Return softest target
+		return b.server.chainParams.PowLimitBits, nil
+	}
+
+	return blockchain.BigToCompact(target), nil
+}
+
+func (b *blockManager) calcDAARequiredDifficulty(lastNode *headerlist.Node, newBlockTime time.Time) (uint32, error) {
 	// For networks that support it, allow special reduction of the
 	// required difficulty once too much time has elapsed without
 	// mining a block.
@@ -2667,7 +2767,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	}
 
 	prev := lastNode
-	for i := 0; i < blockchain.DifficultyAdjustmentWindow; i++ {
+	for i := 0; i < difficultyAdjustmentWindow; i++ {
 		prev = prev.Prev()
 	}
 
@@ -2714,16 +2814,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	return blockchain.BigToCompact(newTarget), nil
 }
 
-func (b *blockManager) calcLegacyRequiredDifficulty(newBlockTime time.Time,
-	reorgAttempt bool, algorithm blockchain.DifficultyAlgorithm) (uint32, error) {
-
-	hList := b.headerList
-	if reorgAttempt {
-		hList = b.reorgList
-	}
-
-	lastNode := hList.Back()
-
+func (b *blockManager) calcLegacyRequiredDifficulty(lastNode *headerlist.Node, newBlockTime time.Time, hList headerlist.Chain, algorithm blockchain.DifficultyAlgorithm) (uint32, error) {
 	// Genesis block.
 	if lastNode == nil {
 		return b.server.chainParams.PowLimitBits, nil

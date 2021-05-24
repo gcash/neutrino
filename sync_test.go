@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"github.com/gcash/neutrino/banman"
 	"io"
 	"io/ioutil"
 	"os"
@@ -14,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gcash/neutrino/banman"
 
 	"github.com/gcash/bchd/bchec"
 	"github.com/gcash/bchd/btcjson"
@@ -40,7 +41,7 @@ var (
 	// well. Keep in mind some log messages may not appear in order due to
 	// use of multiple query goroutines in the tests.
 	logLevel    = bchlog.LevelOff
-	syncTimeout = 30 * time.Second
+	syncTimeout = 60 * time.Second
 	syncUpdate  = time.Second
 
 	// Don't set this too high for your platform, or the tests will miss
@@ -249,10 +250,6 @@ func newSecSource(params *chaincfg.Params) *secSource {
 	}
 }
 
-type testLogger struct {
-	t *testing.T
-}
-
 type neutrinoHarness struct {
 	h1, h2, h3 *rpctest.Harness
 	svc        *neutrino.ChainService
@@ -264,10 +261,6 @@ type syncTestCase struct {
 }
 
 var testCases = []*syncTestCase{
-	{
-		name: "initial sync",
-		test: testInitialSync,
-	},
 	{
 		name: "one-shot rescan",
 		test: testRescan,
@@ -283,6 +276,10 @@ var testCases = []*syncTestCase{
 	{
 		name: "check long-running rescan results",
 		test: testRescanResults,
+	},
+	{
+		name: "initial sync",
+		test: testInitialSync,
 	},
 }
 
@@ -303,7 +300,7 @@ var (
 	secSrc                    *secSource
 	addr1, addr2, addr3       bchutil.Address
 	script1, script2, script3 []byte
-	tx1, tx2, tx3             *wire.MsgTx
+	tx1, tx2                  *wire.MsgTx
 	ourOutPoint               wire.OutPoint
 )
 
@@ -1100,7 +1097,10 @@ func TestNeutrinoSync(t *testing.T) {
 		t.Fatalf("Failed to create temporary directory: %s", err)
 	}
 	defer os.RemoveAll(tempDir)
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
+	if err != nil {
+		t.Fatal("Failed to create wallet")
+	}
 	defer db.Close()
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)

@@ -3,15 +3,16 @@ package neutrino
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/gcash/bchd/peer"
-	"github.com/gcash/bchd/txscript"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/neutrino/banman"
 	"io/ioutil"
 	"math/rand"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/gcash/bchd/peer"
+	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/neutrino/banman"
 
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
@@ -39,7 +40,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			"temporary directory: %s", err)
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
 	if err != nil {
 		os.RemoveAll(tempDir)
 		return nil, nil, nil, nil, fmt.Errorf("Error opening DB: %s",
@@ -401,8 +402,9 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			for i := startHeight; i <= maxHeight; i++ {
 				ntfn := <-bm.blockNtfnChan
 				if _, ok := ntfn.(*blockntfns.Connected); !ok {
-					t.Fatal("expected block connected " +
+					t.Error("expected block connected " +
 						"notification")
+					return
 				}
 			}
 		}()
@@ -633,8 +635,9 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			for i := startHeight; i <= maxHeight; i++ {
 				ntfn := <-bm.blockNtfnChan
 				if _, ok := ntfn.(*blockntfns.Connected); !ok {
-					t.Fatal("expected block connected " +
+					t.Error("expected block connected " +
 						"notification")
+					return
 				}
 			}
 		}()
