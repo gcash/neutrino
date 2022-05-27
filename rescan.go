@@ -13,6 +13,7 @@ import (
 	"github.com/gcash/bchd/chaincfg"
 
 	"github.com/gcash/bchd/btcjson"
+	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/rpcclient"
 	"github.com/gcash/bchd/txscript"
@@ -523,6 +524,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			curHeader = header
 			curStamp.Hash = header.BlockHash()
 			curStamp.Height++
+			curStamp.Timestamp = header.Timestamp
 		}
 
 		log.Tracef("Rescan got block %d (%s)", curStamp.Height,
