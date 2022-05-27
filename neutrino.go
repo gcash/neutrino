@@ -6,11 +6,6 @@ package neutrino
 import (
 	"errors"
 	"fmt"
-	"github.com/gcash/bchd/btcjson"
-	"github.com/gcash/bchd/txscript"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
-	"github.com/gcash/neutrino/banman"
 	"net"
 	"strconv"
 	"sync"
@@ -19,14 +14,19 @@ import (
 
 	"github.com/gcash/bchd/addrmgr"
 	"github.com/gcash/bchd/blockchain"
+	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/peer"
+	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
+	"github.com/gcash/neutrino/banman"
 	"github.com/gcash/neutrino/blockntfns"
 	"github.com/gcash/neutrino/cache/lru"
 	"github.com/gcash/neutrino/filterdb"
@@ -919,8 +919,9 @@ func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 	}
 
 	return &waddrmgr.BlockStamp{
-		Height: int32(bestHeight),
-		Hash:   bestHeader.BlockHash(),
+		Height:    int32(bestHeight),
+		Hash:      bestHeader.BlockHash(),
+		Timestamp: bestHeader.Timestamp,
 	}, nil
 }
 
@@ -1115,8 +1116,9 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		return nil, err
 	}
 	bs := &waddrmgr.BlockStamp{
-		Height: int32(headerHeight),
-		Hash:   header.BlockHash(),
+		Height:    int32(headerHeight),
+		Hash:      header.BlockHash(),
+		Timestamp: header.Timestamp,
 	}
 
 	_, regHeight, err := s.RegFilterHeaders.ChainTip()
