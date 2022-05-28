@@ -4,11 +4,11 @@ package neutrino
 
 import (
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
@@ -1447,7 +1447,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 		// the other peer must query its own state to determine whether
 		// it should accept the transaction.
 		append(
-			[]QueryOption{Timeout(time.Millisecond * 500)},
+			[]QueryOption{Timeout(s.broadcastTimeout)},
 			options...,
 		)...,
 	)
