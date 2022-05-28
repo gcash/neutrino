@@ -6,11 +6,6 @@ package neutrino
 import (
 	"errors"
 	"fmt"
-	"github.com/gcash/bchd/btcjson"
-	"github.com/gcash/bchd/txscript"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
-	"github.com/gcash/neutrino/banman"
 	"net"
 	"strconv"
 	"sync"
@@ -19,14 +14,19 @@ import (
 
 	"github.com/gcash/bchd/addrmgr"
 	"github.com/gcash/bchd/blockchain"
+	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/peer"
+	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
+	"github.com/gcash/neutrino/banman"
 	"github.com/gcash/neutrino/blockntfns"
 	"github.com/gcash/neutrino/cache/lru"
 	"github.com/gcash/neutrino/filterdb"
@@ -87,6 +87,13 @@ var (
 	// keep in memory if no size is specified in the neutrino.Config.
 	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
+
+// isDevNetwork indicates if the chain is a private development network, namely
+// simnet or regtest/regnet.
+func isDevNetwork(net wire.BitcoinNet) bool {
+	return net == chaincfg.SimNetParams.Net ||
+		net == chaincfg.RegressionNetParams.Net
+}
 
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
 // after a new block has been accepted. The purpose of the message is to update
@@ -248,21 +255,10 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 	}
 }
 
-// pushSendHeadersMsg sends a sendheaders message to the connected peer.
-func (sp *ServerPeer) pushSendHeadersMsg() error {
-	if sp.VersionKnown() {
-		if sp.ProtocolVersion() > wire.SendHeadersVersion {
-			sp.QueueMessage(wire.NewMsgSendHeaders(), nil)
-		}
-	}
-	return nil
-}
-
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
-// to send the "sendheaders" command to peers that are of a sufficienty new
-// protocol version.
+// to kick start communication with them.
 func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
-	sp.pushSendHeadersMsg()
+	sp.server.AddPeer(sp)
 }
 
 // OnVersion is invoked when a peer receives a version bitcoin message
@@ -292,47 +288,15 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		return nil
 	}
 
-	// Signal the block manager this peer is a new sync candidate.
-	sp.server.blockManager.NewPeer(sp)
-
-	// Update the address manager and request known addresses from the
-	// remote peer for outbound connections.  This is skipped when running
-	// on the simulation test network since it is only intended to connect
-	// to specified peers and actively avoids advertising and connecting to
-	// discovered peers.
-	if sp.server.chainParams.Net != chaincfg.SimNetParams.Net {
-		addrManager := sp.server.addrManager
-
-		// Request known addresses if the server address manager needs
-		// more and the peer has a protocol version new enough to
-		// include a timestamp with addresses.
-		hasTimestamp := sp.ProtocolVersion() >=
-			wire.NetAddressTimeVersion
-		if addrManager.NeedMoreAddresses() && hasTimestamp {
-			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
-		}
-
-		// Add the address to the addr manager anew, and also mark it
-		// as a good address.
-		sp.server.addrManager.AddAddresses(
-			[]*wire.NetAddress{sp.NA()}, sp.NA(),
-		)
-		addrManager.Good(sp.NA())
-
-		// Update the address manager with the advertised services for
-		// outbound connections in case they have changed. This is not
-		// done for inbound connections to help prevent malicious
-		// behavior and is skipped when running on the simulation test
-		// network since it is only intended to connect to specified
-		// peers and actively avoids advertising and connecting to
-		// discovered peers.
-		if !sp.Inbound() {
-			sp.server.addrManager.SetServices(sp.NA(), msg.Services)
-		}
+	// Update the address manager with the advertised services for outbound
+	// connections in case they have changed. This is not done for inbound
+	// connections to help prevent malicious behavior and is skipped when
+	// running on the simulation test network since it is only intended to
+	// connect to specified peers and actively avoids advertising and
+	// connecting to discovered peers.
+	if !sp.Inbound() {
+		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
 	}
-
-	// Add valid peer to the server.
-	sp.server.AddPeer(sp)
 
 	return nil
 }
@@ -414,11 +378,11 @@ func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
 // used to notify the server about advertised addresses.
 func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
-	// Ignore addresses when running on the simulation test network.  This
+	// Ignore addresses when running on a private development network.  This
 	// helps prevent the network from becoming another public test network
 	// since it will not be able to learn about other peers that have not
 	// specifically been provided.
-	if sp.server.chainParams.Net == chaincfg.SimNetParams.Net {
+	if isDevNetwork(sp.server.chainParams.Net) {
 		return
 	}
 
@@ -754,12 +718,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
 
 	// Only setup a function to return new addresses to connect to when not
-	// running in connect-only mode.  The simulation network is always in
-	// connect-only mode since it is only intended to connect to specified
-	// peers and actively avoid advertising and connecting to discovered
-	// peers in order to prevent it from becoming a public test network.
+	// running in connect-only mode.  Private development networks are always in
+	// connect-only mode since it is only intended to connect to specified peers
+	// and actively avoid advertising and connecting to discovered peers in
+	// order to prevent it from becoming a public test network.
 	var newAddressFunc func() (net.Addr, error)
-	if s.chainParams.Net != chaincfg.SimNetParams.Net {
+	if !isDevNetwork(s.chainParams.Net) {
 		newAddressFunc = func() (net.Addr, error) {
 
 			// Gather our set of currently connected peers to avoid
@@ -1313,7 +1277,7 @@ func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeer
 // handleAddPeerMsg deals with adding new peers.  It is invoked from the
 // peerHandler goroutine.
 func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
-	if sp == nil {
+	if sp == nil || !sp.Connected() {
 		return false
 	}
 
@@ -1357,6 +1321,35 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		s.firstPeerConnect = nil
 	}
 
+	// Update the address' last seen time if the peer has acknowledged our
+	// version and has sent us its version as well.
+	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
+		s.addrManager.Connected(sp.NA())
+	}
+
+	// Signal the block manager this peer is a new sync candidate.
+	s.blockManager.NewPeer(sp)
+
+	// Update the address manager and request known addresses from the
+	// remote peer for outbound connections. This is skipped when running on
+	// a development network since it is only intended to connect to
+	// specified peers and actively avoids advertising and connecting to
+	// discovered peers.
+	if !isDevNetwork(s.chainParams.Net) {
+		// Request known addresses if the server address manager needs
+		// more and the peer has a protocol version new enough to
+		// include a timestamp with addresses.
+		hasTimestamp := sp.ProtocolVersion() >= wire.NetAddressTimeVersion
+		if s.addrManager.NeedMoreAddresses() && hasTimestamp {
+			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
+		}
+
+		// Add the address to the addr manager anew, and also mark it as
+		// a good address.
+		s.addrManager.AddAddresses([]*wire.NetAddress{sp.NA()}, sp.NA())
+		s.addrManager.Good(sp.NA())
+	}
+
 	return true
 }
 
@@ -1390,12 +1383,6 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		} else {
 			s.connManager.Disconnect(sp.connReq.ID())
 		}
-	}
-
-	// Update the address' last seen time if the peer has acknowledged
-	// our version and has sent us its version as well.
-	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
-		s.addrManager.Connected(sp.NA())
 	}
 
 	// If we get here it means that either we didn't know about the peer
@@ -1442,8 +1429,8 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 func newPeerConfig(sp *ServerPeer) *peer.Config {
 	return &peer.Config{
 		Listeners: peer.MessageListeners{
-			OnVersion: sp.OnVersion,
-			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
+			OnVersion:   sp.OnVersion,
+			OnVerAck:    sp.OnVerAck,
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
 			OnReject:    sp.OnReject,
