@@ -270,7 +270,7 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 // header entry. The passed newTip pointer should point to the hash of the new
 // chain tip. Optionally, if the entry is to be deleted as well, then the
 // delete flag should be set to true.
-func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
+func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, del bool) error {
 	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
 		rootBucket := tx.ReadWriteBucket(indexBucket)
 
@@ -291,7 +291,7 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
 		// If the delete flag is set, then we'll also delete this entry
 		// from the database as the primary index (block headers) is
 		// being rolled back.
-		if delete {
+		if del {
 			prevTipHash := rootBucket.Get(tipKey)
 			if err := rootBucket.Delete(prevTipHash); err != nil {
 				return err

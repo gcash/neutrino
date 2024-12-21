@@ -1350,8 +1350,8 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 		neutrino.NotificationHandlers(
 			rpcclient.NotificationHandlers{
 				OnBlockConnected: func(
-					hash *chainhash.Hash,
-					height int32, time time.Time) {
+					_ *chainhash.Hash,
+					height int32, _ time.Time) {
 					rescanMtx.Lock()
 					gotLog = append(gotLog,
 						[]byte("bc")...)
@@ -1360,7 +1360,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 				},
 				OnBlockDisconnected: func(
 					hash *chainhash.Hash,
-					height int32, time time.Time) {
+					height int32, _ time.Time) {
 					rescanMtx.Lock()
 					delete(ourKnownTxsByBlock, *hash)
 					gotLog = append(gotLog,

@@ -4,10 +4,11 @@ package neutrino
 
 import (
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/davecgh/go-spew/spew"
 
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
@@ -213,10 +214,10 @@ func OptimisticReverseBatch() QueryOption {
 //
 // State transitions are:
 //
-// * queryWaitSubmit->queryWaitResponse - send query to peer
-// * queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
-//   response
-// * queryWaitResponse->queryAnswered - acceptable response to query received
+//   - queryWaitSubmit->queryWaitResponse - send query to peer
+//   - queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
+//     response
+//   - queryWaitResponse->queryAnswered - acceptable response to query received
 type queryState uint32
 
 const (
@@ -1335,6 +1336,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					s.chainParams.PowLimit,
 					s.timeSource,
 					int32(height) > s.chainParams.MagneticAnonomalyForkHeight,
+					int32(height) > s.chainParams.Upgrade9ForkHeight,
 				); err != nil {
 					log.Warnf("Invalid block for %s "+
 						"received from %s -- "+
@@ -1405,8 +1407,8 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// Send the peer query and listen for getdata.
 	s.queryAllPeers(
 		inv,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
-			peerQuit chan<- struct{}) {
+		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
+			_ chan<- struct{}) {
 
 			switch response := resp.(type) {
 			// A peer has replied with a GetData message, so we'll

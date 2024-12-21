@@ -6,10 +6,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/gcash/bchd/chaincfg"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gcash/bchd/chaincfg"
 
 	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg/chainhash"
@@ -1289,7 +1290,7 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 			errStr += fmt.Sprintf(" It returned error: %s", r.err)
 		}
 		r.errMtx.Unlock()
-		return fmt.Errorf(errStr)
+		return errors.New(errStr)
 	}
 
 	return nil
