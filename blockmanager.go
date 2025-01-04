@@ -1538,7 +1538,7 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 // other peers.
 func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter,
-	threshold int) ([]string, error) {
+	_ int) ([]string, error) {
 
 	badPeers := make(map[string]struct{})
 
@@ -1630,7 +1630,7 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	// Send the query to all peers and record their responses in the map.
 	b.server.queryAllPeers(
 		msg,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
 			peerQuit chan<- struct{}) {
 			switch m := resp.(type) {
 			case *wire.MsgCFHeaders:
@@ -1668,8 +1668,8 @@ func (b *blockManager) fetchFilterFromAllPeers(
 	fitlerReqMsg := wire.NewMsgGetCFilters(filterType, height, &blockHash)
 	b.queries.queryAllPeers(
 		fitlerReqMsg,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
-			peerQuit chan<- struct{}) {
+		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
+			_ chan<- struct{}) {
 
 			switch response := resp.(type) {
 			// We're only interested in "cfilter" messages.
@@ -1716,7 +1716,7 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 	getCheckptMsg := wire.NewMsgGetCFCheckpt(fType, lastHash)
 	b.queries.queryAllPeers(
 		getCheckptMsg,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
 			peerQuit chan<- struct{}) {
 			switch m := resp.(type) {
 			case *wire.MsgCFCheckpt:
@@ -2085,7 +2085,7 @@ func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *ServerPeer) {
 	}
 }
 
-/// QueueTx adds the passed transaction message and peer to the block handling
+// / QueueTx adds the passed transaction message and peer to the block handling
 // queue. Responds to the done channel argument after the tx message is
 // processed.
 func (b *blockManager) QueueTx(tx *bchutil.Tx, sp *ServerPeer) {
@@ -2679,7 +2679,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	return 0, errors.New("unknown difficulty algorithm")
 }
 
-func (b *blockManager) calcAsertRequiredDifficulty(lastNode *headerlist.Node, anchorBlockHeight int32, anchorBlockTime int64, anchorBlockBits uint32, newBlockTime time.Time) (uint32, error) {
+func (b *blockManager) calcAsertRequiredDifficulty(lastNode *headerlist.Node, _ int32, _ int64, _ uint32, newBlockTime time.Time) (uint32, error) {
 	// For networks that support it, allow special reduction of the
 	// required difficulty once too much time has elapsed without
 	// mining a block.

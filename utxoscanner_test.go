@@ -35,7 +35,7 @@ func (c *MockChainClient) SetBlock(hash *chainhash.Hash, block *bchutil.Block) {
 }
 
 func (c *MockChainClient) GetBlockFromNetwork(blockHash chainhash.Hash,
-	options ...QueryOption) (*bchutil.Block, error) {
+	_ ...QueryOption) (*bchutil.Block, error) {
 	return c.getBlockResponse[blockHash], nil
 }
 
@@ -59,8 +59,8 @@ func (c *MockChainClient) BestSnapshot() (*waddrmgr.BlockStamp, error) {
 	}, nil
 }
 
-func (c *MockChainClient) blockFilterMatches(ro *rescanOptions,
-	blockHash *chainhash.Hash) (bool, error) {
+func (c *MockChainClient) blockFilterMatches(_ *rescanOptions,
+	_ *chainhash.Hash) (bool, error) {
 	return true, nil
 }
 

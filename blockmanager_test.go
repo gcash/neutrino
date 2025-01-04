@@ -347,7 +347,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// responses.
 		bm.server.queryBatch = func(msgs []wire.Message,
 			f func(*ServerPeer, wire.Message, wire.Message) bool,
-			q <-chan struct{}, qo ...QueryOption) {
+			_ <-chan struct{}, _ ...QueryOption) {
 
 			responses, err := generateResponses(msgs, headers)
 			if err != nil {
@@ -572,7 +572,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		bm.server.queryBatch = func(msgs []wire.Message,
 			f func(*ServerPeer, wire.Message, wire.Message) bool,
-			q <-chan struct{}, qo ...QueryOption) {
+			_ <-chan struct{}, _ ...QueryOption) {
 
 			responses, err := generateResponses(msgs, headers)
 			if err != nil {
@@ -718,10 +718,10 @@ type mockQueryAccess struct {
 }
 
 func (m *mockQueryAccess) queryAllPeers(
-	queryMsg wire.Message,
+	_ wire.Message,
 	checkResponse func(sp *ServerPeer, resp wire.Message,
 		quit chan<- struct{}, peerQuit chan<- struct{}),
-	options ...QueryOption) {
+	_ ...QueryOption) {
 
 	for p, resp := range m.answers {
 		pp, err := peer.NewOutboundPeer(&peer.Config{}, p)

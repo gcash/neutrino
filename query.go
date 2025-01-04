@@ -260,10 +260,10 @@ func OptimisticReverseBatch() QueryOption {
 //
 // State transitions are:
 //
-// * queryWaitSubmit->queryWaitResponse - send query to peer
-// * queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
-//   response
-// * queryWaitResponse->queryAnswered - acceptable response to query received
+//   - queryWaitSubmit->queryWaitResponse - send query to peer
+//   - queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
+//     response
+//   - queryWaitResponse->queryAnswered - acceptable response to query received
 type queryState uint32
 
 const (
@@ -1382,6 +1382,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					s.chainParams.PowLimit,
 					s.timeSource,
 					int32(height) > s.chainParams.MagneticAnonomalyForkHeight,
+					int32(height) > s.chainParams.Upgrade9ForkHeight,
 				); err != nil {
 					log.Warnf("Invalid block for %s "+
 						"received from %s -- "+
@@ -1457,8 +1458,8 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// Send the peer query and listen for getdata.
 	s.queryAllPeers(
 		inv,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
-			peerQuit chan<- struct{}) {
+		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
+			_ chan<- struct{}) {
 
 			// The "closer" can be used to either close the peer
 			// quit channel after a certain timeout or immediately.
