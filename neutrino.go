@@ -12,6 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gcash/bchd/btcjson"
+	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchutil/gcs"
+	"github.com/gcash/bchutil/gcs/builder"
+	"github.com/gcash/neutrino/banman"
+
 	"github.com/gcash/bchd/addrmgr"
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/btcjson"
@@ -261,7 +267,7 @@ func (sp *ServerPeer) pushSendHeadersMsg() error {
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
 // to send the "sendheaders" command to peers that are of a sufficienty new
 // protocol version.
-func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
+func (sp *ServerPeer) OnVerAck(_ *peer.Peer, _ *wire.MsgVerAck) {
 	sp.pushSendHeadersMsg()
 }
 
@@ -372,7 +378,7 @@ func (sp *ServerPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 
 // OnTx is invoked when a peer sends us a new transaction. We will will pass it
 // into the blockmanager for further processing.
-func (sp *ServerPeer) OnTx(p *peer.Peer, msg *wire.MsgTx) {
+func (sp *ServerPeer) OnTx(_ *peer.Peer, msg *wire.MsgTx) {
 	if sp.server.blocksOnly {
 		log.Tracef("Ignoring tx %v from %v - blocksonly enabled",
 			msg.TxHash(), sp)
@@ -407,7 +413,7 @@ func (sp *ServerPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 
 // OnReject is invoked when a peer receives a reject bitcoin message and is
 // used to notify the server about a rejected transaction.
-func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
+func (sp *ServerPeer) OnReject(_ *peer.Peer, _ *wire.MsgReject) {
 	// TODO(roaseef): log?
 }
 
@@ -479,7 +485,7 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 // OnRead is invoked when a peer receives a message and it is used to update
 // the bytes received by the server.
 func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
-	err error) {
+	_ error) {
 
 	sp.server.AddBytesReceived(uint64(bytesRead))
 
@@ -518,7 +524,7 @@ func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 
 // OnWrite is invoked when a peer sends a message and it is used to update
 // the bytes sent by the server.
-func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, err error) {
+func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, _ wire.Message, _ error) {
 	sp.server.AddBytesSent(uint64(bytesWritten))
 }
 
@@ -937,8 +943,9 @@ func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 	}
 
 	return &waddrmgr.BlockStamp{
-		Height: int32(bestHeight),
-		Hash:   bestHeader.BlockHash(),
+		Height:    int32(bestHeight),
+		Hash:      bestHeader.BlockHash(),
+		Timestamp: bestHeader.Timestamp,
 	}, nil
 }
 
@@ -1133,8 +1140,9 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		return nil, err
 	}
 	bs := &waddrmgr.BlockStamp{
-		Height: int32(headerHeight),
-		Hash:   header.BlockHash(),
+		Height:    int32(headerHeight),
+		Hash:      header.BlockHash(),
+		Timestamp: header.Timestamp,
 	}
 
 	_, regHeight, err := s.RegFilterHeaders.ChainTip()

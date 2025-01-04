@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg"
@@ -15,8 +17,6 @@ import (
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
-	"sort"
-	"time"
 )
 
 // BlockHeaderStore is an interface that provides an abstraction for a generic
@@ -334,11 +334,11 @@ func (h *blockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 	// With this height obtained, we'll use it to read the latest header
 	// from disk, so we can populate our return value which requires the
 	// prev header hash.
-	bestHeader, err := h.readHeader(chainTipHeight)
+	prevHeader, err := h.readHeader(chainTipHeight - 1)
 	if err != nil {
 		return nil, err
 	}
-	prevHeaderHash := bestHeader.PrevBlock
+	prevHeaderHash := prevHeader.BlockHash()
 
 	// Now that we have the information we need to return from this
 	// function, we can now truncate the header file, and then use the hash
@@ -351,8 +351,9 @@ func (h *blockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 	}
 
 	return &waddrmgr.BlockStamp{
-		Height: int32(chainTipHeight) - 1,
-		Hash:   prevHeaderHash,
+		Height:    int32(chainTipHeight) - 1,
+		Hash:      prevHeaderHash,
+		Timestamp: prevHeader.Timestamp,
 	}, nil
 }
 

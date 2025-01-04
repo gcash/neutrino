@@ -288,7 +288,7 @@ func TestBlockCache(t *testing.T) {
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
 	cs.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
+		wire.Message, chan<- struct{}), _ ...QueryOption) {
 
 		getData, ok := msg.(*wire.MsgGetData)
 		if !ok {

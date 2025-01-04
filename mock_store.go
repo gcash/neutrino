@@ -68,7 +68,7 @@ func (m *mockBlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp,
 	return nil, nil
 }
 
-func (m *mockBlockHeaderStore) CalcPastMedianTime(headers []*wire.BlockHeader) (time.Time, error) {
+func (m *mockBlockHeaderStore) CalcPastMedianTime(_ []*wire.BlockHeader) (time.Time, error) {
 	return time.Time{}, nil
 }
 

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gcash/bchd/chaincfg"
+
 	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
@@ -522,6 +524,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			curHeader = header
 			curStamp.Hash = header.BlockHash()
 			curStamp.Height++
+			curStamp.Timestamp = header.Timestamp
 		}
 
 		log.Tracef("Rescan got block %d (%s)", curStamp.Height,
@@ -1289,7 +1292,7 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 			errStr += fmt.Sprintf(" It returned error: %s", r.err)
 		}
 		r.errMtx.Unlock()
-		return fmt.Errorf(errStr)
+		return errors.New(errStr)
 	}
 
 	return nil
