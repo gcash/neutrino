@@ -111,10 +111,16 @@ github.com/gcash/bchwallet v0.10.1-0.20241220234253-0350bbbbc8e3 h1:FZehiTpev8o6
 github.com/gcash/bchwallet v0.10.1-0.20241220234253-0350bbbbc8e3/go.mod h1:KbY2XBAcWlXpwk6I/wAvVU0V15SodfzXKp0gyzwpNwQ=
 github.com/gcash/bchwallet v0.11.0-rc2 h1:mb5BJ+Ijjj8aAukI9JaJuqTQPceuQV0z9WEDK5D7e4c=
 github.com/gcash/bchwallet v0.11.0-rc2/go.mod h1:8YzIP7r4z8jEu/Rj0AXhAAEOjE2gZznACU7XtGWtNbw=
+github.com/gcash/bchwallet v0.11.0-rc2.0.20250104020358-70a3b3d0068a h1:R5EejsxgEQqd5xdjCaCSs40ze/+F/uaOAmrWWJUUA8E=
+github.com/gcash/bchwallet v0.11.0-rc2.0.20250104020358-70a3b3d0068a/go.mod h1:8YzIP7r4z8jEu/Rj0AXhAAEOjE2gZznACU7XtGWtNbw=
 github.com/gcash/bchwallet/walletdb v0.0.0-20241221001704-23316621c8ac h1:PK1avFW37QIgdqo94C+GlFM/cZ3JlqSSRdbBHY4VKnY=
 github.com/gcash/bchwallet/walletdb v0.0.0-20241221001704-23316621c8ac/go.mod h1:KNPI56t8uMlItrGyu3tS4NCd3jGfA6KjdUg4bsk+QJg=
 github.com/gcash/bchwallet/walletdb v0.0.0-20241221072606-2fc0cd088d98 h1:Rya4JhQ9z4p5QlPtwhKdI0OQS0qYJY3HAuGj48W4mN4=
 github.com/gcash/bchwallet/walletdb v0.0.0-20241221072606-2fc0cd088d98/go.mod h1:KNPI56t8uMlItrGyu3tS4NCd3jGfA6KjdUg4bsk+QJg=
+github.com/gcash/bchwallet/walletdb v0.0.0-20250104020658-3c5bb4048b68 h1:6ZHSUhblIOGF6bs/8FOANaZQ8fdSfkTRzJ1h11O7Ouc=
+github.com/gcash/bchwallet/walletdb v0.0.0-20250104020658-3c5bb4048b68/go.mod h1:KNPI56t8uMlItrGyu3tS4NCd3jGfA6KjdUg4bsk+QJg=
+github.com/gcash/bchwallet/walletdb v0.0.0-20250104020820-db0d019f6991 h1:Bs95QEd0hwbBKJTn+pApNF2CDdUi71NO1DkYBJiFDDs=
+github.com/gcash/bchwallet/walletdb v0.0.0-20250104020820-db0d019f6991/go.mod h1:KNPI56t8uMlItrGyu3tS4NCd3jGfA6KjdUg4bsk+QJg=
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/gin-contrib/sse v0.1.0/go.mod h1:RHrZQHXnP2xjPF+u1gW/2HnVO7nvIa9PG3Gm+fLHvGI=
 github.com/gin-gonic/gin v1.6.3/go.mod h1:75u5sXoLsGZoRN5Sgbi1eraJ4GU3++wFwWzhwvtwp4M=
@@ -560,6 +566,8 @@ google.golang.org/genproto/googleapis/api v0.0.0-20241219192143-6b3ec007d9bb h1:
 google.golang.org/genproto/googleapis/api v0.0.0-20241219192143-6b3ec007d9bb/go.mod h1:E5//3O5ZIG2l71Xnt+P/CYUY8Bxs8E7WMoZ9tlcMbAY=
 google.golang.org/genproto/googleapis/rpc v0.0.0-20241219192143-6b3ec007d9bb h1:3oy2tynMOP1QbTC0MsNNAV+Se8M2Bd0A5+x1QHyw+pI=
 google.golang.org/genproto/googleapis/rpc v0.0.0-20241219192143-6b3ec007d9bb/go.mod h1:lcTa1sDdWEIHMWlITnIczmw5w60CF9ffkb8Z+DVmmjA=
+google.golang.org/genproto/googleapis/rpc v0.0.0-20250102185135-69823020774d h1:xJJRGY7TJcvIlpSrN3K6LAWgNFUILlO+OMAqtg9aqnw=
+google.golang.org/genproto/googleapis/rpc v0.0.0-20250102185135-69823020774d/go.mod h1:3ENsm/5D1mzDyhpzeRi1NR784I0BcofWBoSc5QqqMK4=
 google.golang.org/grpc v1.17.0/go.mod h1:6QZJwpn2B+Zp71q/5VxRsJ6NXXVCE5NRUHRo+f3cWCs=
 google.golang.org/grpc v1.19.0/go.mod h1:mqu4LbDTu4XGKhr4mRzUsmM4RtVoemTSY81AxZiDr8c=
 google.golang.org/grpc v1.20.0/go.mod h1:chYK+tFQF0nDUGJgXMSgLCQk3phJEuONr2DCgLDdAQM=
@@ -589,6 +597,8 @@ google.golang.org/protobuf v1.24.0/go.mod h1:r/3tXBNzIEhYS9I1OUVjXDlt8tc493IdKGj
 google.golang.org/protobuf v1.25.0/go.mod h1:9JNX74DMeImyA3h4bdi1ymwjUzf21/xIlbajtzgsN7c=
 google.golang.org/protobuf v1.36.0 h1:mjIs9gYtt56AzC4ZaffQuh88TZurBGhIJMBZGSxNerQ=
 google.golang.org/protobuf v1.36.0/go.mod h1:9fA7Ob0pmnwhb644+1+CVWFRbNajQ6iRojtC/QF5bRE=
+google.golang.org/protobuf v1.36.1 h1:yBPeRvTftaleIgM3PZ/WBIZ7XM/eEYAaEyCwvyjq/gk=
+google.golang.org/protobuf v1.36.1/go.mod h1:9fA7Ob0pmnwhb644+1+CVWFRbNajQ6iRojtC/QF5bRE=
 gopkg.in/alecthomas/kingpin.v2 v2.2.6/go.mod h1:FMv+mEhP44yOT+4EoQTLFTRgOQ1FBLkstjWtayDeSgw=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=

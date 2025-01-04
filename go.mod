@@ -7,8 +7,8 @@ require (
 	github.com/gcash/bchd v0.20.0-rc2
 	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
 	github.com/gcash/bchutil v0.0.0-20241220024231-3d67040d3361
-	github.com/gcash/bchwallet v0.11.0-rc2
-	github.com/gcash/bchwallet/walletdb v0.0.0-20241221072606-2fc0cd088d98
+	github.com/gcash/bchwallet v0.11.0-rc2.0.20250104020358-70a3b3d0068a
+	github.com/gcash/bchwallet/walletdb v0.0.0-20250104020820-db0d019f6991
 )
 
 require (
@@ -54,9 +54,9 @@ require (
 	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/tools v0.28.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20241219192143-6b3ec007d9bb // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20241219192143-6b3ec007d9bb // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250102185135-69823020774d // indirect
 	google.golang.org/grpc v1.69.2 // indirect
-	google.golang.org/protobuf v1.36.0 // indirect
+	google.golang.org/protobuf v1.36.1 // indirect
 	lukechampine.com/uint128 v1.3.0 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
