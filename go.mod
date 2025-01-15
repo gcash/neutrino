@@ -4,11 +4,11 @@ go 1.23.4
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/gcash/bchd v0.20.0-rc2
+	github.com/gcash/bchd v0.20.0
 	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
-	github.com/gcash/bchutil v0.0.0-20241220024231-3d67040d3361
-	github.com/gcash/bchwallet v0.11.0-rc2.0.20250104020358-70a3b3d0068a
-	github.com/gcash/bchwallet/walletdb v0.0.0-20250104020820-db0d019f6991
+	github.com/gcash/bchutil v0.0.0-20250115071209-216bd54f0d4d
+	github.com/gcash/bchwallet v0.11.0-rc2.0.20250115072133-6e7560f475b4
+	github.com/gcash/bchwallet/walletdb v0.0.0-20250104021928-5a2ec88af6cc
 )
 
 require (
@@ -46,17 +46,17 @@ require (
 	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	github.com/zquestz/grab v0.0.0-20190224022517-abcee96e61b1 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
-	golang.org/x/crypto v0.31.0 // indirect
+	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/mod v0.22.0 // indirect
-	golang.org/x/net v0.33.0 // indirect
+	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
-	golang.org/x/tools v0.28.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20241219192143-6b3ec007d9bb // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250102185135-69823020774d // indirect
-	google.golang.org/grpc v1.69.2 // indirect
-	google.golang.org/protobuf v1.36.1 // indirect
+	golang.org/x/tools v0.29.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250106144421-5f5ef82da422 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250106144421-5f5ef82da422 // indirect
+	google.golang.org/grpc v1.69.4 // indirect
+	google.golang.org/protobuf v1.36.2 // indirect
 	lukechampine.com/uint128 v1.3.0 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
