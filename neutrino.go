@@ -12,12 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gcash/bchd/btcjson"
-	"github.com/gcash/bchd/txscript"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
-	"github.com/gcash/neutrino/banman"
-
 	"github.com/gcash/bchd/addrmgr"
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/btcjson"
