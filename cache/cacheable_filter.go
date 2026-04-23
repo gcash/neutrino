@@ -20,7 +20,7 @@ type CacheableFilter struct {
 
 // Size returns size of this filter in bytes.
 func (c *CacheableFilter) Size() (uint64, error) {
-	f, err := c.Filter.NBytes()
+	f, err := c.NBytes()
 	if err != nil {
 		return 0, err
 	}

@@ -229,7 +229,7 @@ func TestDequeueAtHeight(t *testing.T) {
 	}
 
 	// Now, add the requests in order of their block heights.
-	req100000, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
+	_, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestDequeueAtHeight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-	req100000, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
+	_, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
@@ -336,8 +336,8 @@ func TestUtxoScannerScanBasic(t *testing.T) {
 		BestSnapshot:       mockChainClient.BestSnapshot,
 		BlockFilterMatches: mockChainClient.blockFilterMatches,
 	})
-	scanner.Start()
-	defer scanner.Stop()
+	_ = scanner.Start()
+	defer func() { _ = scanner.Stop() }()
 
 	var (
 		spendReport *SpendReport
@@ -391,8 +391,8 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 		},
 		BlockFilterMatches: mockChainClient.blockFilterMatches,
 	})
-	scanner.Start()
-	defer scanner.Stop()
+	_ = scanner.Start()
+	defer func() { _ = scanner.Stop() }()
 
 	var (
 		spendReport *SpendReport
@@ -460,8 +460,8 @@ func TestUtxoScannerCancelRequest(t *testing.T) {
 		BlockFilterMatches: mockChainClient.blockFilterMatches,
 	})
 
-	scanner.Start()
-	defer scanner.Stop()
+	_ = scanner.Start()
+	defer func() { _ = scanner.Stop() }()
 
 	// Add the requests in order of their block heights.
 	req100000, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
@@ -532,7 +532,7 @@ func TestUtxoScannerCancelRequest(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner.Stop()
+		_ = scanner.Stop()
 	}()
 
 	// The second request should be cancelled as soon as the utxoscanner

@@ -114,6 +114,7 @@ func loadBlocks(t *testing.T, dataFile string, network wire.BitcoinNet) (
 // genRandomBlockHash generates a random block hash using math/rand.
 func genRandomBlockHash() *chainhash.Hash {
 	var seed [32]byte
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	rand.Read(seed[:])
 	hash := chainhash.Hash(seed)
 	return &hash
@@ -130,6 +131,7 @@ func genRandFilter(numElements uint32, t *testing.T) (
 	elements := make([][]byte, numElements)
 	for i := uint32(0); i < numElements; i++ {
 		var elem [20]byte
+		//nolint:staticcheck // test code: deterministic math/rand is fine.
 		if _, err := rand.Read(elem[:]); err != nil {
 			t.Fatalf("unable to create random filter: %v", err)
 			return nil, nil, 0
@@ -139,6 +141,7 @@ func genRandFilter(numElements uint32, t *testing.T) (
 	}
 
 	var key [16]byte
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	if _, err := rand.Read(key[:]); err != nil {
 		t.Fatalf("unable to create random filter: %v", err)
 		return nil, nil, 0
@@ -196,11 +199,11 @@ func TestCacheBigEnoughHoldsAllFilter(t *testing.T) {
 
 	// Insert those filters into the cache making sure nothing gets evicted.
 	assertEqual(t, cs.FilterCache.Len(), 0, "")
-	cs.putFilterToCache(b1, filterdb.RegularFilter, f1)
+	_, _ = cs.putFilterToCache(b1, filterdb.RegularFilter, f1)
 	assertEqual(t, cs.FilterCache.Len(), 1, "")
-	cs.putFilterToCache(b2, filterdb.RegularFilter, f2)
+	_, _ = cs.putFilterToCache(b2, filterdb.RegularFilter, f2)
 	assertEqual(t, cs.FilterCache.Len(), 2, "")
-	cs.putFilterToCache(b3, filterdb.RegularFilter, f3)
+	_, _ = cs.putFilterToCache(b3, filterdb.RegularFilter, f3)
 	assertEqual(t, cs.FilterCache.Len(), 3, "")
 
 	// Check that we can get those filters back independent of Get order.
@@ -230,13 +233,13 @@ func TestBigFilterEvictsEverything(t *testing.T) {
 
 	// Insert the smaller filters.
 	assertEqual(t, cs.FilterCache.Len(), 0, "")
-	cs.putFilterToCache(b1, filterdb.RegularFilter, f1)
+	_, _ = cs.putFilterToCache(b1, filterdb.RegularFilter, f1)
 	assertEqual(t, cs.FilterCache.Len(), 1, "")
-	cs.putFilterToCache(b2, filterdb.RegularFilter, f2)
+	_, _ = cs.putFilterToCache(b2, filterdb.RegularFilter, f2)
 	assertEqual(t, cs.FilterCache.Len(), 2, "")
 
 	// Insert the big filter and check all previous filters are evicted.
-	cs.putFilterToCache(b3, filterdb.RegularFilter, f3)
+	_, _ = cs.putFilterToCache(b3, filterdb.RegularFilter, f3)
 	assertEqual(t, cs.FilterCache.Len(), 1, "")
 	assertEqual(t, getFilter(cs, b3, t), f3, "")
 }
@@ -264,7 +267,7 @@ func TestBlockCache(t *testing.T) {
 			BlockHeader: &b.MsgBlock().Header,
 			Height:      uint32(i),
 		}
-		headers.WriteHeaders(header)
+		_ = headers.WriteHeaders(header)
 
 		sz, _ := (&cache.CacheableBlock{Block: b}).Size()
 		if i < len(blocks)/2 {

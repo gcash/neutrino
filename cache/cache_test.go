@@ -57,7 +57,7 @@ func TestBlockFilterCaches(t *testing.T) {
 		// Put the generated filter in the filter caches.
 		cacheKey := cache.FilterCacheKey{BlockHash: blockHash, FilterType: filterType}
 		for _, c := range filterCaches {
-			c.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
+			_, _ = c.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 		}
 
 		msgBlock := &wire.MsgBlock{}
@@ -70,7 +70,7 @@ func TestBlockFilterCaches(t *testing.T) {
 			wire.InvTypeBlock, &blockHash,
 		)
 		for _, c := range blockCaches {
-			c.Put(*blockKey, &cache.CacheableBlock{Block: block})
+			_, _ = c.Put(*blockKey, &cache.CacheableBlock{Block: block})
 		}
 	}
 

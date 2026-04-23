@@ -544,7 +544,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 					curStamp.Height, &curHeader, nil,
 				)
 			}
+			//nolint:staticcheck // deprecated notification still supported for compatibility.
 			if ro.ntfn.OnBlockConnected != nil {
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				ro.ntfn.OnBlockConnected(
 					&curStamp.Hash, curStamp.Height,
 					curHeader.Timestamp,
@@ -619,7 +621,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 				curStamp.Height, &curHeader,
 			)
 		}
+		//nolint:staticcheck // deprecated notification still supported for compatibility.
 		if ro.ntfn.OnBlockDisconnected != nil {
+			//nolint:staticcheck // deprecated notification still supported for compatibility.
 			ro.ntfn.OnBlockDisconnected(
 				&curStamp.Hash, curStamp.Height,
 				curHeader.Timestamp,
@@ -843,7 +847,9 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 			relevantTxs)
 	}
 
+	//nolint:staticcheck // deprecated notification still supported for compatibility.
 	if ro.ntfn.OnBlockConnected != nil {
+		//nolint:staticcheck // deprecated notification still supported for compatibility.
 		ro.ntfn.OnBlockConnected(&curStamp.Hash,
 			curStamp.Height, curHeader.Timestamp)
 	}
@@ -864,7 +870,7 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 		return nil, err
 	}
 	if block == nil {
-		return nil, fmt.Errorf("Couldn't get block %d (%s) from "+
+		return nil, fmt.Errorf("couldn't get block %d (%s) from "+
 			"network", curStamp.Height, curStamp.Hash)
 	}
 
@@ -884,7 +890,9 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 
 		if ro.spendsWatchedInput(tx) {
 			relevant = true
+			//nolint:staticcheck // deprecated notification still supported for compatibility.
 			if ro.ntfn.OnRedeemingTx != nil {
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				ro.ntfn.OnRedeemingTx(tx, &txDetails)
 			}
 		}
@@ -900,7 +908,9 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 
 		if pays {
 			relevant = true
+			//nolint:staticcheck // deprecated notification still supported for compatibility.
 			if ro.ntfn.OnRecvTx != nil {
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				ro.ntfn.OnRecvTx(tx, &txDetails)
 			}
 		}
@@ -949,7 +959,9 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 			relevantTxs)
 	}
 
+	//nolint:staticcheck // deprecated notification still supported for compatibility.
 	if ro.ntfn.OnBlockConnected != nil {
+		//nolint:staticcheck // deprecated notification still supported for compatibility.
 		ro.ntfn.OnBlockConnected(&curStamp.Hash,
 			curStamp.Height, curHeader.Timestamp)
 	}
@@ -1052,8 +1064,10 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 	// If we need to rewind, then we'll walk backwards in the chain until
 	// we arrive at the block _just_ before the rewind.
 	for curStamp.Height > int32(update.rewind) {
+		//nolint:staticcheck // deprecated notification still supported for compatibility.
 		if ro.ntfn.OnBlockDisconnected != nil &&
 			!update.disableDisconnectedNtfns {
+			//nolint:staticcheck // deprecated notification still supported for compatibility.
 			ro.ntfn.OnBlockDisconnected(&curStamp.Hash,
 				curStamp.Height, curHeader.Timestamp)
 		}

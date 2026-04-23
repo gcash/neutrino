@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -21,7 +20,7 @@ import (
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	*blockHeaderStore, error) {
-	tempDir, err := ioutil.TempDir("", "store_test")
+	tempDir, err := os.MkdirTemp("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -38,8 +37,8 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	}
 
 	cleanUp := func() {
-		os.RemoveAll(tempDir)
-		db.Close()
+		_ = os.RemoveAll(tempDir)
+		_ = db.Close()
 	}
 
 	return cleanUp, db, tempDir, hStore.(*blockHeaderStore), nil
@@ -76,6 +75,7 @@ func TestBlockHeaderStoreOperations(t *testing.T) {
 		t.Fatalf("unable to create new block header store: %v", err)
 	}
 
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	rand.Seed(time.Now().Unix())
 
 	// With our test instance created, we'll now generate a series of
@@ -224,7 +224,7 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 }
 
 func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderStore, error) {
-	tempDir, err := ioutil.TempDir("", "store_test")
+	tempDir, err := os.MkdirTemp("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -243,8 +243,8 @@ func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderSt
 	}
 
 	cleanUp := func() {
-		os.RemoveAll(tempDir)
-		db.Close()
+		_ = os.RemoveAll(tempDir)
+		_ = db.Close()
 	}
 
 	return cleanUp, db, tempDir, hStore, nil
@@ -272,6 +272,7 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 		t.Fatalf("unable to create new block header store: %v", err)
 	}
 
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	rand.Seed(time.Now().Unix())
 
 	// With our test instance created, we'll now generate a series of
@@ -464,6 +465,7 @@ func TestBlockHeadersFetchHeaderAncestors(t *testing.T) {
 		t.Fatalf("unable to create new block header store: %v", err)
 	}
 
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	rand.Seed(time.Now().Unix())
 
 	// With our test instance created, we'll now generate a series of

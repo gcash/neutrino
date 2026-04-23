@@ -68,11 +68,15 @@ const (
 )
 
 // filterStoreLookup
+//
+//nolint:unused // retained for future use.
 type filterStoreLookup func(*ChainService) *headerfs.FilterHeaderStore
 
 var (
 	// filterTypes is a map of filter types to synchronize to a lookup
 	// function for the service's store for that filter type.
+	//
+	//nolint:unused // retained for future use.
 	filterTypes = map[wire.FilterType]filterStoreLookup{
 		wire.GCSFilterRegular: func(
 			s *ChainService) *headerfs.FilterHeaderStore {
@@ -428,7 +432,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 			return
 		}
 		stopHash := &zeroHash
-		sp.PushGetHeadersMsg(locator, stopHash)
+		_ = sp.PushGetHeadersMsg(locator, stopHash)
 	}
 
 	// Start syncing by choosing the best candidate if needed.
@@ -474,7 +478,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		if err != nil {
 			return
 		}
-		b.headerList.ResetHeaderState(headerlist.Node{
+		_ = b.headerList.ResetHeaderState(headerlist.Node{
 			Header: *header,
 			Height: int32(height),
 		}, b.server.BlockHeaders)
@@ -525,7 +529,7 @@ waitForHeaders:
 
 	b.newHeadersSignal.L.Lock()
 	b.newFilterHeadersMtx.RLock()
-	for !(b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip || b.BlockHeadersSynced()) {
+	for b.filterHeaderTip+wire.CFCheckptInterval > b.headerTip && !b.BlockHeadersSynced() {
 		b.newFilterHeadersMtx.RUnlock()
 		b.newHeadersSignal.Wait()
 
@@ -836,7 +840,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// set of peers.
 	pristineHeaders, ok := headers[key]
 	if !ok {
-		return fmt.Errorf("All peers served bogus headers! Retrying " +
+		return fmt.Errorf("all peers served bogus headers! retrying " +
 			"with new set")
 	}
 
@@ -1153,7 +1157,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	}
 	if *tip != msg.PrevFilterHeader {
 		return nil, fmt.Errorf("attempt to write cfheaders out of "+
-			"order! Tip=%v (height=%v), prev_hash=%v.", *tip,
+			"order! Tip=%v (height=%v), prev_hash=%v", *tip,
 			tipHeight, msg.PrevFilterHeader)
 	}
 
@@ -1609,6 +1613,9 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	// or at the end of the maximum-size response message, whichever is
 	// larger.
 	stopHeader, stopHeight, err := b.server.BlockHeaders.ChainTip()
+	if err != nil {
+		return nil, 0
+	}
 	if stopHeight-height >= wire.MaxCFHeadersPerMsg {
 		stopHeader, err = b.server.BlockHeaders.FetchHeaderByHeight(
 			height + wire.MaxCFHeadersPerMsg - 1,
@@ -1991,7 +1998,7 @@ func (b *blockManager) startSync(peers *list.List) {
 
 		// With our stop hash selected, we'll kick off the sync from
 		// this peer with an initial GetHeaders message.
-		b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
+		_ = b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
 	} else {
 		log.Warnf("No sync peer candidates available")
 	}
@@ -2115,7 +2122,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 				}
 				if _, exists := b.requestedTxns[iv.Hash]; !exists {
 					b.requestedTxns[iv.Hash] = struct{}{}
-					gdmsg.AddInvVect(iv)
+					_ = gdmsg.AddInvVect(iv)
 				}
 			}
 		}
@@ -2382,7 +2389,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// peer.  We also keep track of the work represented by
 			// these headers so we can compare it to the work in
 			// the known good chain.
-			b.reorgList.ResetHeaderState(headerlist.Node{
+			_ = b.reorgList.ResetHeaderState(headerlist.Node{
 				Header: *backHead,
 				Height: int32(backHeight),
 			}, b.server.BlockHeaders)
@@ -2478,7 +2485,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				// Should we panic here?
 			}
 
-			b.headerList.ResetHeaderState(headerlist.Node{
+			_ = b.headerList.ResetHeaderState(headerlist.Node{
 				Header: *backHead,
 				Height: int32(backHeight),
 			}, b.server.BlockHeaders)

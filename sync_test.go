@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"runtime"
@@ -432,7 +431,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 
 	// Generate 124 blocks on h1 to make sure it reorgs the other nodes.
 	// Ensure the ChainService instance stays caught up.
-	harness.h1.Node.Generate(124)
+	_, _ = harness.h1.Node.Generate(124)
 	err = waitForSync(t, harness.svc, harness.h1)
 	if err != nil {
 		checkErrChan(t, errChan)
@@ -647,6 +646,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	}
 }
 
+//nolint:unused // retained for future tests.
 func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]byte, error) {
 	var inputScripts [][]byte
 	for i, tx := range block.Transactions {
@@ -762,8 +762,8 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	// is somewhat random, depending on how quickly the nodes process each
 	// other's notifications vs finding new blocks, but the two nodes should
 	// remain fully synchronized with each other at the end.
-	go harness.h2.Node.Generate(75)
-	harness.h1.Node.Generate(50)
+	go func() { _, _ = harness.h2.Node.Generate(75) }()
+	_, _ = harness.h1.Node.Generate(50)
 
 	err = rpctest.JoinNodes([]*rpctest.Harness{harness.h1, harness.h2},
 		rpctest.Blocks)
@@ -1008,7 +1008,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
 	}
-	defer h1.TearDown()
+	defer func() { _ = h1.TearDown() }()
 	err = h1.SetUp(false, 0)
 	if err != nil {
 		t.Fatalf("Couldn't set up harness: %s", err)
@@ -1025,7 +1025,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
 	}
-	defer h2.TearDown()
+	defer func() { _ = h2.TearDown() }()
 	err = h2.SetUp(false, 0)
 	if err != nil {
 		t.Fatalf("Couldn't set up harness: %s", err)
@@ -1038,7 +1038,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
 	}
-	defer h3.TearDown()
+	defer func() { _ = h3.TearDown() }()
 	err = h3.SetUp(false, 0)
 	if err != nil {
 		t.Fatalf("Couldn't set up harness: %s", err)
@@ -1092,16 +1092,16 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Create a temporary directory, initialize an empty walletdb with an
 	// SPV chain namespace, and create a configuration for the ChainService.
-	tempDir, err := ioutil.TempDir("", "neutrino")
+	tempDir, err := os.MkdirTemp("", "neutrino")
 	if err != nil {
 		t.Fatalf("Failed to create temporary directory: %s", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
 	if err != nil {
 		t.Fatal("Failed to create wallet")
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)
 	}
@@ -1123,8 +1123,8 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
 	}
-	svc.Start()
-	defer svc.Stop()
+	_ = svc.Start()
+	defer func() { _ = svc.Stop() }()
 
 	// Create a test harness with the three nodes and the neutrino instance.
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
@@ -1145,7 +1145,7 @@ func csd(harnesses []*rpctest.Harness) error {
 		return err
 	}
 	// Tear down node at the end of the function.
-	defer hTemp.TearDown()
+	defer func() { _ = hTemp.TearDown() }()
 	err = hTemp.SetUp(false, 0)
 	if err != nil {
 		return err

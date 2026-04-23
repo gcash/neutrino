@@ -1259,7 +1259,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// can't request it.
 	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil, fmt.Errorf("Couldn't get header for block %s "+
+		return nil, fmt.Errorf("couldn't get header for block %s "+
 			"from database", blockHash)
 	}
 
@@ -1287,7 +1287,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(inv)
+	_ = getData.AddInvVect(inv)
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -1396,7 +1396,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// Create an inv.
 	txHash := tx.TxHash()
 	inv := wire.NewMsgInv()
-	inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+	_ = inv.AddInvVect(wire.NewInvVect(invType, &txHash))
 
 	// We'll gather all of the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use

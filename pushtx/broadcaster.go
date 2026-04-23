@@ -83,7 +83,8 @@ func NewBroadcaster(cfg *Config) *Broadcaster {
 func (b *Broadcaster) Start() error {
 	var err error
 	b.start.Do(func() {
-		sub, err := b.cfg.SubscribeBlocks()
+		var sub *blockntfns.Subscription
+		sub, err = b.cfg.SubscribeBlocks()
 		if err != nil {
 			err = fmt.Errorf("unable to subscribe for block "+
 				"notifications: %v", err)

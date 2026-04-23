@@ -58,6 +58,7 @@ type FilterDatabase interface {
 type FilterStore struct {
 	db walletdb.DB
 
+	//nolint:unused // retained for future use.
 	chainParams chaincfg.Params
 }
 

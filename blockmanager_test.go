@@ -3,7 +3,6 @@ package neutrino
 import (
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"strings"
@@ -34,7 +33,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 	*headerfs.FilterHeaderStore, func(), error) {
 
 	// Set up the block and filter header stores.
-	tempDir, err := ioutil.TempDir("", "neutrino")
+	tempDir, err := os.MkdirTemp("", "neutrino")
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("Failed to create "+
 			"temporary directory: %s", err)
@@ -42,14 +41,14 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 
 	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
 	if err != nil {
-		os.RemoveAll(tempDir)
+		_ = os.RemoveAll(tempDir)
 		return nil, nil, nil, nil, fmt.Errorf("Error opening DB: %s",
 			err)
 	}
 
 	cleanUp := func() {
-		db.Close()
-		os.RemoveAll(tempDir)
+		_ = db.Close()
+		_ = os.RemoveAll(tempDir)
 	}
 
 	hdrStore, err := headerfs.NewBlockHeaderStore(
@@ -654,6 +653,8 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 // OP_RETURNS with push-only scripts.
 //
 // NOTE: this is not a valid filter, only for tests.
+//
+//nolint:unused // retained for future tests.
 func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	blockHash := block.BlockHash()
 	b := builder.WithKeyHash(&blockHash)
@@ -678,6 +679,8 @@ func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 // OP_RETURNS.
 //
 // NOTE: this is not a valid filter, only for tests.
+//
+//nolint:unused // retained for future tests.
 func buildAllPkScriptsFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	blockHash := block.BlockHash()
 	b := builder.WithKeyHash(&blockHash)
@@ -829,7 +832,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		}
 
 		for i := uint32(0); i < 2*badIndex; i++ {
-			msg.AddCFHash(&filterHash)
+			_ = msg.AddCFHash(&filterHash)
 		}
 
 		headers := make(map[string]*wire.MsgCFHeaders)

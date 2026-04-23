@@ -48,11 +48,11 @@ func TestEmptyCacheSizeZero(t *testing.T) {
 func TestCacheNeverExceedsSize(t *testing.T) {
 	t.Parallel()
 	c := NewCache(2)
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
 	assertEqual(t, c.Len(), 2, "")
 	for i := 0; i < 10; i++ {
-		c.Put(i, &sizeable{value: i, size: 1})
+		_, _ = c.Put(i, &sizeable{value: i, size: 1})
 		assertEqual(t, c.Len(), 2, "")
 	}
 }
@@ -63,17 +63,17 @@ func TestCacheNeverExceedsSize(t *testing.T) {
 func TestCacheAlwaysHasLastAccessedItems(t *testing.T) {
 	t.Parallel()
 	c := NewCache(2)
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
 	two := getSizeableValue(c.Get(2))
 	one := getSizeableValue(c.Get(1))
 	assertEqual(t, two, 2, "")
 	assertEqual(t, one, 1, "")
 
 	c = NewCache(2)
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
-	c.Put(3, &sizeable{value: 3, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(3, &sizeable{value: 3, size: 1})
 	oneEntry, _ := c.Get(1)
 	two = getSizeableValue(c.Get(2))
 	three := getSizeableValue(c.Get(3))
@@ -82,10 +82,10 @@ func TestCacheAlwaysHasLastAccessedItems(t *testing.T) {
 	assertEqual(t, three, 3, "")
 
 	c = NewCache(2)
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
-	c.Get(1)
-	c.Put(3, &sizeable{value: 3, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Get(1)
+	_, _ = c.Put(3, &sizeable{value: 3, size: 1})
 	one = getSizeableValue(c.Get(1))
 	twoEntry, _ := c.Get(2)
 	three = getSizeableValue(c.Get(3))
@@ -100,25 +100,25 @@ func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 	t.Parallel()
 	c := NewCache(3)
 
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
-	c.Put(3, &sizeable{value: 3, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(3, &sizeable{value: 3, size: 1})
 
 	// Insert element with size=capacity of cache, should evict everything.
-	c.Put(4, &sizeable{value: 4, size: 3})
+	_, _ = c.Put(4, &sizeable{value: 4, size: 3})
 	assertEqual(t, c.Len(), 1, "")
 	assertEqual(t, len(c.cache), 1, "")
 	four := getSizeableValue(c.Get(4))
 	assertEqual(t, four, 4, "")
 
 	c = NewCache(6)
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 2})
-	c.Put(3, &sizeable{value: 3, size: 3})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 2})
+	_, _ = c.Put(3, &sizeable{value: 3, size: 3})
 	assertEqual(t, c.size, uint64(6), "")
 
 	// Insert element with size=capacity of cache.
-	c.Put(4, &sizeable{value: 4, size: 6})
+	_, _ = c.Put(4, &sizeable{value: 4, size: 6})
 	assertEqual(t, c.Len(), 1, "")
 	assertEqual(t, len(c.cache), 1, "")
 	four = getSizeableValue(c.Get(4))
@@ -152,17 +152,17 @@ func TestManySmallElementCanInsertAfterBigEviction(t *testing.T) {
 
 	assertEqual(t, c.Len(), 1, "")
 
-	c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
 	two := getSizeableValue(c.Get(2))
 	oneEntry, _ := c.Get(1)
 	assertEqual(t, c.Len(), 1, "")
 	assertEqual(t, two, 2, "")
 	assertEqual(t, oneEntry, nil, "")
 
-	c.Put(3, &sizeable{value: 3, size: 1})
+	_, _ = c.Put(3, &sizeable{value: 3, size: 1})
 	assertEqual(t, c.Len(), 2, "")
 
-	c.Put(4, &sizeable{value: 4, size: 1})
+	_, _ = c.Put(4, &sizeable{value: 4, size: 1})
 	assertEqual(t, c.Len(), 3, "")
 
 	two = getSizeableValue(c.Get(2))
@@ -180,10 +180,10 @@ func TestReplacingElementValueSmallerSize(t *testing.T) {
 	t.Parallel()
 	c := NewCache(2)
 
-	c.Put(1, &sizeable{value: 1, size: 2})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 2})
 
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
 	one := getSizeableValue(c.Get(1))
 	two := getSizeableValue(c.Get(2))
 	assertEqual(t, one, 1, "")
@@ -197,10 +197,10 @@ func TestReplacingElementValueBiggerSize(t *testing.T) {
 	t.Parallel()
 	c := NewCache(2)
 
-	c.Put(1, &sizeable{value: 1, size: 1})
-	c.Put(2, &sizeable{value: 2, size: 1})
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 1})
 
-	c.Put(1, &sizeable{value: 3, size: 2})
+	_, _ = c.Put(1, &sizeable{value: 3, size: 2})
 	assertEqual(t, c.Len(), 1, "")
 	one := getSizeableValue(c.Get(1))
 	assertEqual(t, one, 3, "")

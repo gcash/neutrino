@@ -3,7 +3,6 @@ package headerfs
 import (
 	"bytes"
 	"crypto/rand"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -12,7 +11,7 @@ import (
 )
 
 func createTestIndex() (func(), *headerIndex, error) {
-	tempDir, err := ioutil.TempDir("", "neutrino")
+	tempDir, err := os.MkdirTemp("", "neutrino")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -23,8 +22,8 @@ func createTestIndex() (func(), *headerIndex, error) {
 	}
 
 	cleanUp := func() {
-		os.RemoveAll(tempDir)
-		db.Close()
+		_ = os.RemoveAll(tempDir)
+		_ = db.Close()
 	}
 
 	filterDB, err := newHeaderIndex(db, Block)

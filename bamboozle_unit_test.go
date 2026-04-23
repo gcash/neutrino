@@ -1,7 +1,6 @@
 package neutrino
 
 import (
-	"io/ioutil"
 	"os"
 	"sort"
 	"testing"
@@ -168,6 +167,7 @@ var (
 			decodeHashNoError("01234567890abcdeffedcba09f76543210"),
 		},
 	}
+	//nolint:unused // retained for future tests.
 	headers4 = func() *wire.MsgCFHeaders {
 		cfh := &wire.MsgCFHeaders{
 			FilterHashes: []*chainhash.Hash{
@@ -433,17 +433,17 @@ func heightToHeader(height uint32) *wire.BlockHeader {
 }
 
 func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) {
-	tempDir, err := ioutil.TempDir("", "neutrino")
+	tempDir, err := os.MkdirTemp("", "neutrino")
 	if err != nil {
 		t.Fatalf("Failed to create temporary directory: %s", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
 	if err != nil {
 		t.Fatalf("Error opening DB: %s", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	hdrStore, err := headerfs.NewBlockHeaderStore(
 		tempDir, db, &chaincfg.SimNetParams,

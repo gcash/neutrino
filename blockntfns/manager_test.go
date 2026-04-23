@@ -217,7 +217,7 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 
 		return nil, 0, errors.New("")
 	}
-	sub, err := subMgr.NewSubscription(0)
+	_, err := subMgr.NewSubscription(0)
 	if err == nil {
 		t.Fatal("expected registration to fail due to not delivering " +
 			"backlog")
@@ -244,7 +244,7 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 	}
 
 	// Register a new client with the expected current height.
-	sub, err = subMgr.NewSubscription(subCurrentHeight)
+	sub, err := subMgr.NewSubscription(subCurrentHeight)
 	if err != nil {
 		t.Fatalf("unable to register new subscription: %v", err)
 	}

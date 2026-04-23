@@ -1,7 +1,6 @@
 package banman_test
 
 import (
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,7 +16,7 @@ import (
 func createTestBanStore(t *testing.T) (banman.Store, func()) {
 	t.Helper()
 
-	dbDir, err := ioutil.TempDir("", "")
+	dbDir, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatalf("unable to create db dir: %v", err)
 	}
@@ -25,13 +24,13 @@ func createTestBanStore(t *testing.T) (banman.Store, func()) {
 
 	db, err := walletdb.Create("bdb", dbPath, true)
 	if err != nil {
-		os.RemoveAll(dbDir)
+		_ = os.RemoveAll(dbDir)
 		t.Fatalf("unable to create db: %v", err)
 	}
 
 	cleanUp := func() {
-		db.Close()
-		os.RemoveAll(dbDir)
+		_ = db.Close()
+		_ = os.RemoveAll(dbDir)
 	}
 
 	banStore, err := banman.NewStore(db)

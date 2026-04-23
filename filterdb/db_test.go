@@ -1,7 +1,6 @@
 package filterdb
 
 import (
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"reflect"
@@ -16,7 +15,7 @@ import (
 )
 
 func createTestDatabase() (func(), FilterDatabase, error) {
-	tempDir, err := ioutil.TempDir("", "neutrino")
+	tempDir, err := os.MkdirTemp("", "neutrino")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -27,8 +26,8 @@ func createTestDatabase() (func(), FilterDatabase, error) {
 	}
 
 	cleanUp := func() {
-		os.RemoveAll(tempDir)
-		db.Close()
+		_ = os.RemoveAll(tempDir)
+		_ = db.Close()
 	}
 
 	filterDB, err := New(db, chaincfg.SimNetParams)
@@ -66,6 +65,7 @@ func genRandFilter(numElements uint32) (*gcs.Filter, error) {
 	elements := make([][]byte, numElements)
 	for i := uint32(0); i < numElements; i++ {
 		var elem [20]byte
+		//nolint:staticcheck // test code: deterministic math/rand is fine.
 		if _, err := rand.Read(elem[:]); err != nil {
 			return nil, err
 		}
@@ -74,6 +74,7 @@ func genRandFilter(numElements uint32) (*gcs.Filter, error) {
 	}
 
 	var key [16]byte
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	if _, err := rand.Read(key[:]); err != nil {
 		return nil, err
 	}
@@ -99,6 +100,7 @@ func TestFilterStorage(t *testing.T) {
 	// We'll generate a random block hash to create our test filters
 	// against.
 	var randHash chainhash.Hash
+	//nolint:staticcheck // test code: deterministic math/rand is fine.
 	if _, err := rand.Read(randHash[:]); err != nil {
 		t.Fatalf("unable to generate random hash: %v", err)
 	}

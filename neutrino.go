@@ -151,14 +151,17 @@ type ServerPeer struct {
 
 	*peer.Peer
 
-	connReq        *connmgr.ConnReq
-	server         *ChainService
-	persistent     bool
-	continueHash   *chainhash.Hash
+	connReq    *connmgr.ConnReq
+	server     *ChainService
+	persistent bool
+	//nolint:unused // retained for future use.
+	continueHash *chainhash.Hash
+	//nolint:unused // retained for future use.
 	requestQueue   []*wire.InvVect
 	knownAddresses map[string]struct{}
-	banScore       connmgr.DynamicBanScore
-	quit           chan struct{}
+	//nolint:unused // retained for future use.
+	banScore connmgr.DynamicBanScore
+	quit     chan struct{}
 
 	// The following map of subcribers is used to subscribe to messages
 	// from the peer. This allows broadcast to multiple subscribers at
@@ -202,6 +205,8 @@ func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
 }
 
 // addressKnown true if the given address is already known to the peer.
+//
+//nolint:unused // retained for future use.
 func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
 	_, exists := sp.knownAddresses[addrmgr.NetAddressKey(na)]
 	return exists
@@ -212,6 +217,8 @@ func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
 // threshold, a warning is logged including the reason provided. Further, if
 // the score is above the ban threshold, the peer will be banned and
 // disconnected.
+//
+//nolint:unused // retained for future use.
 func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 	// No warning is logged and no score is calculated if banning is
 	// disabled.
@@ -262,7 +269,7 @@ func (sp *ServerPeer) pushSendHeadersMsg() error {
 // to send the "sendheaders" command to peers that are of a sufficienty new
 // protocol version.
 func (sp *ServerPeer) OnVerAck(_ *peer.Peer, _ *wire.MsgVerAck) {
-	sp.pushSendHeadersMsg()
+	_ = sp.pushSendHeadersMsg()
 }
 
 // OnVersion is invoked when a peer receives a version bitcoin message
@@ -1056,7 +1063,7 @@ func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
 
 		// Subscribe to the response
 		peer.subscribeRecvMsg(subscription)
-		peer.Peer.QueueMessage(wire.NewMsgGetCFMempool(wire.GCSFilterRegular), nil)
+		peer.QueueMessage(wire.NewMsgGetCFMempool(wire.GCSFilterRegular), nil)
 
 		timeout := time.After(QueryTimeout)
 	listenResponse:
@@ -1099,7 +1106,7 @@ func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
 				// to send inv messages with the mempool transactions. The rest of our code should handle
 				// processing the invs.
 				if matched {
-					peer.Peer.QueueMessage(wire.NewMsgMemPool(), nil)
+					peer.QueueMessage(wire.NewMsgMemPool(), nil)
 					return
 				}
 			}
@@ -1484,7 +1491,7 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	// If we're already connected to this peer, then we'll close out the new
 	// connection and keep the old.
 	if s.PeerByAddr(peerAddr) != nil {
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 
@@ -1555,7 +1562,7 @@ func (s *ChainService) Start() error {
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
 
-	s.utxoScanner.Start()
+	_ = s.utxoScanner.Start()
 
 	if err := s.broadcaster.Start(); err != nil {
 		return fmt.Errorf("unable to start transaction broadcaster: %v",
@@ -1582,10 +1589,10 @@ func (s *ChainService) Stop() error {
 
 	s.connManager.Stop()
 	s.broadcaster.Stop()
-	s.utxoScanner.Stop()
+	_ = s.utxoScanner.Stop()
 	s.blockSubscriptionMgr.Stop()
-	s.blockManager.Stop()
-	s.addrManager.Stop()
+	_ = s.blockManager.Stop()
+	_ = s.addrManager.Stop()
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
