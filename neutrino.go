@@ -50,7 +50,7 @@ var (
 
 	// UserAgentVersion is the user agent version and is used to help
 	// identify ourselves to other bitcoin peers.
-	UserAgentVersion = "0.0.4-beta"
+	UserAgentVersion = "0.0.5-beta"
 
 	// Services describes the services that are supported by the server.
 	Services = wire.SFNodeCF
