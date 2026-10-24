@@ -90,12 +90,6 @@ type queryOptions struct {
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
 
-	// persistToDisk indicates whether the filter should also be written
-	// to disk in addition to the memory cache. For "normal" wallets, they'll
-	// almost never need to re-match a filter once it's been fetched unless
-	// they're doing something like a key import.
-	persistToDisk bool
-
 	// optimisticBatch indicates whether we expect more calls to follow,
 	// and that we should attempt to batch more items with the query such
 	// that they can be cached, avoiding the extra round trip.
@@ -182,14 +176,6 @@ func Encoding(encoding wire.MessageEncoding) QueryOption {
 func DoneChan(doneChan chan<- struct{}) QueryOption {
 	return func(qo *queryOptions) {
 		qo.doneChan = doneChan
-	}
-}
-
-// PersistToDisk allows the caller to tell that the filter should be kept
-// on disk once it's found.
-func PersistToDisk() QueryOption {
-	return func(qo *queryOptions) {
-		qo.persistToDisk = true
 	}
 }
 
@@ -1092,8 +1078,8 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 		q.filterChan <- gotFilter
 	}
 
-	// Put the filter in the cache and persistToDisk if the caller
-	// requested it.
+	// Put the filter in the cache and persist it to disk if
+	// Config.PersistToDisk is set.
 	// TODO(halseth): for an LRU we could take care to insert the next
 	// height filter last.
 	dbFilterType := filterdb.RegularFilter
@@ -1113,9 +1099,7 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 			"cache size...", numFilters)
 	}
 
-	qo := defaultQueryOptions()
-	qo.applyQueryOptions(q.options...)
-	if qo.persistToDisk {
+	if s.persistToDisk {
 		err = s.FilterDB.PutFilter(
 			&response.BlockHash, gotFilter, dbFilterType,
 		)
@@ -1139,9 +1123,8 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 }
 
 // GetCFilter gets a cfilter from the database. Failing that, it requests the
-// cfilter from the network and writes it to the database. If extended is true,
-// an extended filter will be queried for. Otherwise, we'll fetch the regular
-// filter.
+// cfilter from the network and, if Config.PersistToDisk is set, writes it to
+// the database. Only the regular filter type is supported.
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
 
