@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/gcash/bchd v0.22.3
+	github.com/gcash/bchd v0.22.4-0.20261024085922-52bdb0e536bf
 	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
 	github.com/gcash/bchutil v0.0.0-20261023042530-83c74af4dbd7
 	github.com/gcash/bchwallet v0.13.1-0.20261024010416-c857e5f8a0b2
@@ -26,28 +26,27 @@ require (
 	github.com/desertbit/timer v1.0.1 // indirect
 	github.com/gcash/goleveldb v1.1.0 // indirect
 	github.com/gcash/goslp v1.0.0 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
+	github.com/golang/snappy v1.0.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.32.0 // indirect
 	github.com/jessevdk/go-flags v1.6.1 // indirect
 	github.com/jrick/logrotate v1.1.2 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.67.5 // indirect
-	github.com/prometheus/procfs v0.20.1 // indirect
+	github.com/prometheus/client_golang v1.25.0 // indirect
+	github.com/prometheus/client_model v0.6.3 // indirect
+	github.com/prometheus/common v0.72.1 // indirect
+	github.com/prometheus/procfs v0.23.0 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/traefik/grpc-web v0.18.0 // indirect
 	github.com/zquestz/grab v0.0.0-20190224022517-abcee96e61b1 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260706201446-f0a921348800 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20261019180522-ce908d29299b // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
