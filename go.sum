@@ -119,6 +119,10 @@ github.com/gcash/bchwallet/walletdb v0.0.0-20260423050729-00e545c821f0 h1:Urc2co
 github.com/gcash/bchwallet/walletdb v0.0.0-20260423050729-00e545c821f0/go.mod h1:HV3gxGmn6idyhN8UdENSK8zub37g5wqkqQjTIJWsLsg=
 github.com/gcash/bchwallet/walletdb v0.0.0-20260424012855-ac3c94a808d1 h1:oZFLjHpzts1UZO3JF5HRcHi4JWi39gdmEWS2fZ3vSXY=
 github.com/gcash/bchwallet/walletdb v0.0.0-20260424012855-ac3c94a808d1/go.mod h1:HV3gxGmn6idyhN8UdENSK8zub37g5wqkqQjTIJWsLsg=
+github.com/gcash/goleveldb v1.1.0 h1:ea7gh9xqgAD+llDYhP7ep7daQxLMlcr1zaFTENCygxE=
+github.com/gcash/goleveldb v1.1.0/go.mod h1:5iJUbCHZlp/Gm54CgQz0uYPSX5EMGStfnEzxRiQ3l3Y=
+github.com/gcash/goslp v1.0.0 h1:CUaw4OixaLjJGws1x/lW+56d2QwoABlrUhXG7ssadDw=
+github.com/gcash/goslp v1.0.0/go.mod h1:9hXiB3vl/4agpprXS0i/i2WV7e7Yk9BRT7ThXl5eAM4=
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/gin-contrib/sse v0.1.0/go.mod h1:RHrZQHXnP2xjPF+u1gW/2HnVO7nvIa9PG3Gm+fLHvGI=
 github.com/gin-gonic/gin v1.6.3/go.mod h1:75u5sXoLsGZoRN5Sgbi1eraJ4GU3++wFwWzhwvtwp4M=
@@ -163,6 +167,8 @@ github.com/golang/protobuf v1.4.3/go.mod h1:oDoupMAO8OvCJWAcko0GGGIgR6R6ocIYbsSw
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
 github.com/golang/protobuf v1.5.4/go.mod h1:lnTiLA8Wa4RWRcIUkrtSVa5nRhsEGBg48fD6rSs7xps=
 github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
+github.com/golang/snappy v0.0.4 h1:yAGX7huGHXlcLOEtBnF4w7FQwA26wojNCwOYAEhLjQM=
+github.com/golang/snappy v0.0.4/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
 github.com/google/btree v0.0.0-20180813153112-4030bb1f1f0c/go.mod h1:lNA+9X1NB3Zf8V7Ke586lFgjr2dZNuvo3lPJSGZ5JPQ=
 github.com/google/btree v1.0.0/go.mod h1:lNA+9X1NB3Zf8V7Ke586lFgjr2dZNuvo3lPJSGZ5JPQ=
 github.com/google/go-cmp v0.2.0/go.mod h1:oXzfMopK8JAjlY9xF4vHSVASa0yLyX7SntLO5aqRK0M=
