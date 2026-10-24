@@ -1349,6 +1349,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 		neutrino.StartBlock(startBlock),
 		neutrino.NotificationHandlers(
 			rpcclient.NotificationHandlers{
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				OnBlockConnected: func(
 					_ *chainhash.Hash,
 					height int32, _ time.Time) {
@@ -1358,6 +1359,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 					curBlockHeight = height
 					rescanMtx.Unlock()
 				},
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				OnBlockDisconnected: func(
 					hash *chainhash.Hash,
 					height int32, _ time.Time) {
@@ -1368,6 +1370,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 					curBlockHeight = height - 1
 					rescanMtx.Unlock()
 				},
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				OnRecvTx: func(tx *bchutil.Tx,
 					details *btcjson.BlockDetails) {
 					rescanMtx.Lock()
@@ -1388,6 +1391,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 						[]byte("rv")...)
 					rescanMtx.Unlock()
 				},
+				//nolint:staticcheck // deprecated notification still supported for compatibility.
 				OnRedeemingTx: func(tx *bchutil.Tx,
 					details *btcjson.BlockDetails) {
 					rescanMtx.Lock()

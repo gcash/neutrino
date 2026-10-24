@@ -492,14 +492,14 @@ func TestUtxoScannerCancelRequest(t *testing.T) {
 
 	// Check that neither succeed without any further action.
 	select {
-	case <-err100000:
-		t.Fatalf("getutxo should not have been cancelled yet")
+	case err := <-err100000:
+		t.Fatalf("getutxo should not have been cancelled yet: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	select {
-	case <-err100001:
-		t.Fatalf("getutxo should not have been cancelled yet")
+	case err := <-err100001:
+		t.Fatalf("getutxo should not have been cancelled yet: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -521,8 +521,8 @@ func TestUtxoScannerCancelRequest(t *testing.T) {
 	// The second task shouldn't have been started yet, and should deliver a
 	// message since it wasn't tied to the same cancel chan.
 	select {
-	case <-err100001:
-		t.Fatalf("getutxo should not have been cancelled yet")
+	case err := <-err100001:
+		t.Fatalf("getutxo should not have been cancelled yet: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 

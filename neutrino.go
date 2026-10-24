@@ -198,7 +198,7 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
 // the peer to prevent sending duplicate addresses.
-func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
+func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddressV2) {
 	for _, na := range addresses {
 		sp.knownAddresses[addrmgr.NetAddressKey(na)] = struct{}{}
 	}
@@ -207,7 +207,7 @@ func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
 // addressKnown true if the given address is already known to the peer.
 //
 //nolint:unused // retained for future use.
-func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
+func (sp *ServerPeer) addressKnown(na *wire.NetAddressV2) bool {
 	_, exists := sp.knownAddresses[addrmgr.NetAddressKey(na)]
 	return exists
 }
@@ -322,7 +322,7 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		// Add the address to the addr manager anew, and also mark it
 		// as a good address.
 		sp.server.addrManager.AddAddresses(
-			[]*wire.NetAddress{sp.NA()}, sp.NA(),
+			[]*wire.NetAddressV2{sp.NA()}, sp.NA(),
 		)
 		addrManager.Good(sp.NA())
 
@@ -442,7 +442,7 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		return
 	}
 
-	var addrsSupportingServices []*wire.NetAddress
+	var addrsSupportingServices []*wire.NetAddressV2
 	for _, na := range msg.AddrList {
 		// Don't add more address if we're disconnecting.
 		if !sp.Connected() {
@@ -462,7 +462,8 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 			na.Timestamp = now.Add(-1 * time.Hour * 24 * 5)
 		}
 
-		addrsSupportingServices = append(addrsSupportingServices, na)
+		addrsSupportingServices = append(addrsSupportingServices,
+			wire.NetAddressV2FromLegacy(na))
 
 	}
 
@@ -1186,11 +1187,12 @@ func (s *ChainService) peerHandler() {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
 			s.nameResolver, func(addrs []*wire.NetAddress) {
-				var validAddrs []*wire.NetAddress
+				var validAddrs []*wire.NetAddressV2
 				for _, addr := range addrs {
 					addr.Services = RequiredServices
 
-					validAddrs = append(validAddrs, addr)
+					validAddrs = append(validAddrs,
+						wire.NetAddressV2FromLegacy(addr))
 				}
 
 				if len(validAddrs) == 0 {
