@@ -16,7 +16,6 @@ import (
 	"github.com/gcash/neutrino/banman"
 
 	"github.com/gcash/bchd/bchec"
-	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/integration/rpctest"
@@ -54,11 +53,7 @@ var (
 	// The logged sequence of events we want to see. The value of i
 	// represents the block for which a loop is generating a log entry,
 	// given for readability only.
-	// "bc":	OnBlockConnected
 	// "fc" xx:	OnFilteredBlockConnected with xx (uint8) relevant TXs
-	// "rv":	OnRecvTx
-	// "rd":	OnRedeemingTx
-	// "bd":	OnBlockDisconnected
 	// "fd":	OnFilteredBlockDisconnected
 	wantLog = func() (log []byte) {
 		for i := 1096; i <= 1100; i++ {
@@ -66,32 +61,26 @@ var (
 			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
 			log = append(log, 0x00)
-			// BlockConnected
-			log = append(log, []byte("bc")...)
 		}
 		// Block with one relevant (receive) transaction
-		log = append(log, []byte("rvfc")...)
+		log = append(log, []byte("fc")...)
 		log = append(log, 0x01)
-		log = append(log, []byte("bc")...)
 		// 124 blocks with nothing
 		for i := 1102; i <= 1225; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		// Block with 1 redeeming transaction
-		log = append(log, []byte("rdfc")...)
+		log = append(log, []byte("fc")...)
 		log = append(log, 0x01)
-		log = append(log, []byte("bc")...)
 		// Block with nothing
 		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
-		log = append(log, []byte("bc")...)
 		// Update with rewind - rewind back to 1095, add another address,
 		// and see more interesting transactions.
 		for i := 1227; i >= 1096; i-- {
-			// BlockDisconnected and FilteredBlockDisconnected
-			log = append(log, []byte("bdfd")...)
+			// FilteredBlockDisconnected
+			log = append(log, []byte("fd")...)
 		}
 		// Forward to 1100
 		for i := 1096; i <= 1100; i++ {
@@ -99,58 +88,48 @@ var (
 			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
 			log = append(log, 0x00)
-			// BlockConnected
-			log = append(log, []byte("bc")...)
 		}
 		// Block with two relevant (receive) transactions
-		log = append(log, []byte("rvrvfc")...)
+		log = append(log, []byte("fc")...)
 		log = append(log, 0x02)
-		log = append(log, []byte("bc")...)
 		// 124 blocks with nothing
 		for i := 1102; i <= 1225; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
 		for i := 1226; i <= 1227; i++ {
-			log = append(log, []byte("rdfc")...)
+			log = append(log, []byte("fc")...)
 			log = append(log, 0x01)
-			log = append(log, []byte("bc")...)
 		}
 		// Block with nothing
 		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
-		log = append(log, []byte("bc")...)
 		// 3 block rollback
 		for i := 1228; i >= 1226; i-- {
-			log = append(log, []byte("fdbd")...)
+			log = append(log, []byte("fd")...)
 		}
 		// 1 block reorg with 2 redeeming transactions
-		log = append(log, []byte("rdrdfc")...)
+		log = append(log, []byte("fc")...)
 		log = append(log, 0x02)
-		log = append(log, []byte("bc")...)
 		// 4 block empty reorg
 		for i := 1227; i <= 1230; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		// 5 block rollback
 		for i := 1230; i >= 1226; i-- {
-			log = append(log, []byte("fdbd")...)
+			log = append(log, []byte("fd")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
 		for i := 1226; i <= 1227; i++ {
-			log = append(log, []byte("rdfc")...)
+			log = append(log, []byte("fc")...)
 			log = append(log, 0x01)
-			log = append(log, []byte("bc")...)
 		}
 		// 8 block rest of reorg
 		for i := 1228; i <= 1235; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		return log
 	}()
@@ -164,20 +143,10 @@ var (
 	// happened as expected.
 	gotLog []byte
 
-	// curBlockHeight lets the rescan goroutine track where it thinks the
-	// chain is based on OnBlockConnected and OnBlockDisconnected.
-	curBlockHeight int32
-
 	// curFilteredBlockHeight lets the rescan goroutine track where it
 	// thinks the chain is based on OnFilteredBlockConnected and
 	// OnFilteredBlockDisconnected.
 	curFilteredBlockHeight int32
-
-	// ourKnownTxsByBlock lets the rescan goroutine keep track of
-	// transactions we're interested in that are in the blockchain we're
-	// following as signalled by OnBlockConnected, OnBlockDisconnected,
-	// OnRecvTx, and OnRedeemingTx.
-	ourKnownTxsByBlock = make(map[chainhash.Hash][]*bchutil.Tx)
 
 	// ourKnownTxsByFilteredBlock lets the rescan goroutine keep track of
 	// transactions we're interested in that are in the blockchain we're
@@ -1376,69 +1345,6 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 		neutrino.StartBlock(startBlock),
 		neutrino.NotificationHandlers(
 			rpcclient.NotificationHandlers{
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				OnBlockConnected: func(
-					_ *chainhash.Hash,
-					height int32, _ time.Time) {
-					rescanMtx.Lock()
-					gotLog = append(gotLog,
-						[]byte("bc")...)
-					curBlockHeight = height
-					rescanMtx.Unlock()
-				},
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				OnBlockDisconnected: func(
-					hash *chainhash.Hash,
-					height int32, _ time.Time) {
-					rescanMtx.Lock()
-					delete(ourKnownTxsByBlock, *hash)
-					gotLog = append(gotLog,
-						[]byte("bd")...)
-					curBlockHeight = height - 1
-					rescanMtx.Unlock()
-				},
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				OnRecvTx: func(tx *bchutil.Tx,
-					details *btcjson.BlockDetails) {
-					rescanMtx.Lock()
-					hash, err := chainhash.
-						NewHashFromStr(
-							details.Hash)
-					if err != nil {
-						t.Errorf("Couldn't "+
-							"decode hash "+
-							"%s: %s",
-							details.Hash,
-							err)
-					}
-					ourKnownTxsByBlock[*hash] = append(
-						ourKnownTxsByBlock[*hash],
-						tx)
-					gotLog = append(gotLog,
-						[]byte("rv")...)
-					rescanMtx.Unlock()
-				},
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				OnRedeemingTx: func(tx *bchutil.Tx,
-					details *btcjson.BlockDetails) {
-					rescanMtx.Lock()
-					hash, err := chainhash.
-						NewHashFromStr(
-							details.Hash)
-					if err != nil {
-						t.Errorf("Couldn't "+
-							"decode hash "+
-							"%s: %s",
-							details.Hash,
-							err)
-					}
-					ourKnownTxsByBlock[*hash] = append(
-						ourKnownTxsByBlock[*hash],
-						tx)
-					gotLog = append(gotLog,
-						[]byte("rd")...)
-					rescanMtx.Unlock()
-				},
 				OnFilteredBlockConnected: func(
 					height int32,
 					header *wire.BlockHeader,
@@ -1476,30 +1382,13 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr bchutil.Address,
 // checkRescanStatus returns the number of relevant transactions we currently
 // know about and the currently known height.
 func checkRescanStatus() (int, int32, error) {
-	var txCount [2]int
+	var txCount int
 	rescanMtx.RLock()
 	defer rescanMtx.RUnlock()
-	for _, list := range ourKnownTxsByBlock {
-		for range list {
-			txCount[0]++
-		}
-	}
 	for _, list := range ourKnownTxsByFilteredBlock {
-		for range list {
-			txCount[1]++
-		}
+		txCount += len(list)
 	}
-	if txCount[0] != txCount[1] {
-		return 0, 0, fmt.Errorf("Conflicting transaction count " +
-			"between notifications.")
-	}
-	if curBlockHeight != curFilteredBlockHeight {
-		return 0, 0, fmt.Errorf("Conflicting block height between "+
-			"notifications: onBlockConnected=%d, "+
-			"onFilteredBlockConnected=%d.", curBlockHeight,
-			curFilteredBlockHeight)
-	}
-	return txCount[0], curBlockHeight, nil
+	return txCount, curFilteredBlockHeight, nil
 }
 
 // banPeer bans and disconnects the requested harness from the ChainService

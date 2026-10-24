@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/rpcclient"
@@ -544,14 +543,6 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 					curStamp.Height, &curHeader, nil,
 				)
 			}
-			//nolint:staticcheck // deprecated notification still supported for compatibility.
-			if ro.ntfn.OnBlockConnected != nil {
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				ro.ntfn.OnBlockConnected(
-					&curStamp.Hash, curStamp.Height,
-					curHeader.Timestamp,
-				)
-			}
 
 			return nil
 		}
@@ -614,19 +605,10 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			return nil
 		}
 
-		// Run through notifications. This is all single-threaded. We
-		// include deprecated calls as they're still used, for now.
+		// Run through notifications. This is all single-threaded.
 		if ro.ntfn.OnFilteredBlockDisconnected != nil {
 			ro.ntfn.OnFilteredBlockDisconnected(
 				curStamp.Height, &curHeader,
-			)
-		}
-		//nolint:staticcheck // deprecated notification still supported for compatibility.
-		if ro.ntfn.OnBlockDisconnected != nil {
-			//nolint:staticcheck // deprecated notification still supported for compatibility.
-			ro.ntfn.OnBlockDisconnected(
-				&curStamp.Hash, curStamp.Height,
-				curHeader.Timestamp,
 			)
 		}
 
@@ -847,13 +829,6 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 			relevantTxs)
 	}
 
-	//nolint:staticcheck // deprecated notification still supported for compatibility.
-	if ro.ntfn.OnBlockConnected != nil {
-		//nolint:staticcheck // deprecated notification still supported for compatibility.
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
-			curStamp.Height, curHeader.Timestamp)
-	}
-
 	return nil
 }
 
@@ -874,48 +849,19 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 			"network", curStamp.Height, curStamp.Hash)
 	}
 
-	blockHeader := block.MsgBlock().Header
-	blockDetails := btcjson.BlockDetails{
-		Height: block.Height(),
-		Hash:   block.Hash().String(),
-		Time:   blockHeader.Timestamp.Unix(),
-	}
-
 	relevantTxs := make([]*bchutil.Tx, 0, len(block.Transactions()))
-	for txIdx, tx := range block.Transactions() {
-		txDetails := blockDetails
-		txDetails.Index = txIdx
+	for _, tx := range block.Transactions() {
+		relevant := ro.spendsWatchedInput(tx)
 
-		var relevant bool
-
-		if ro.spendsWatchedInput(tx) {
-			relevant = true
-			//nolint:staticcheck // deprecated notification still supported for compatibility.
-			if ro.ntfn.OnRedeemingTx != nil {
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				ro.ntfn.OnRedeemingTx(tx, &txDetails)
-			}
-		}
-
-		// Even though the transaction may already be known as relevant
-		// and there might not be a notification callback, we need to
-		// call paysWatchedAddr anyway as it updates the rescan
-		// options.
+		// Even though the transaction may already be known as relevant,
+		// we need to call paysWatchedAddr anyway as it updates the
+		// rescan options.
 		pays, err := ro.paysWatchedAddr(tx)
 		if err != nil {
 			return nil, err
 		}
 
-		if pays {
-			relevant = true
-			//nolint:staticcheck // deprecated notification still supported for compatibility.
-			if ro.ntfn.OnRecvTx != nil {
-				//nolint:staticcheck // deprecated notification still supported for compatibility.
-				ro.ntfn.OnRecvTx(tx, &txDetails)
-			}
-		}
-
-		if relevant {
+		if relevant || pays {
 			relevantTxs = append(relevantTxs, tx)
 		}
 	}
@@ -957,13 +903,6 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 	if ro.ntfn.OnFilteredBlockConnected != nil {
 		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
 			relevantTxs)
-	}
-
-	//nolint:staticcheck // deprecated notification still supported for compatibility.
-	if ro.ntfn.OnBlockConnected != nil {
-		//nolint:staticcheck // deprecated notification still supported for compatibility.
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
-			curStamp.Height, curHeader.Timestamp)
 	}
 
 	return nil
@@ -1064,13 +1003,6 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 	// If we need to rewind, then we'll walk backwards in the chain until
 	// we arrive at the block _just_ before the rewind.
 	for curStamp.Height > int32(update.rewind) {
-		//nolint:staticcheck // deprecated notification still supported for compatibility.
-		if ro.ntfn.OnBlockDisconnected != nil &&
-			!update.disableDisconnectedNtfns {
-			//nolint:staticcheck // deprecated notification still supported for compatibility.
-			ro.ntfn.OnBlockDisconnected(&curStamp.Hash,
-				curStamp.Height, curHeader.Timestamp)
-		}
 		if ro.ntfn.OnFilteredBlockDisconnected != nil &&
 			!update.disableDisconnectedNtfns {
 			ro.ntfn.OnFilteredBlockDisconnected(curStamp.Height,
@@ -1271,8 +1203,8 @@ func Rewind(height uint32) UpdateOption {
 	}
 }
 
-// DisableDisconnectedNtfns tells the rescan not to send `OnBlockDisconnected`
-// and `OnFilteredBlockDisconnected` notifications when rewinding.
+// DisableDisconnectedNtfns tells the rescan not to send
+// `OnFilteredBlockDisconnected` notifications when rewinding.
 func DisableDisconnectedNtfns(disabled bool) UpdateOption {
 	return func(uo *updateOptions) {
 		uo.disableDisconnectedNtfns = disabled
