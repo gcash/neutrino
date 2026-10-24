@@ -8,7 +8,7 @@ require (
 	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
 	github.com/gcash/bchutil v0.0.0-20261023042530-83c74af4dbd7
 	github.com/gcash/bchwallet v0.13.1-0.20261024010416-c857e5f8a0b2
-	github.com/gcash/bchwallet/walletdb v0.0.0-20260424012855-ac3c94a808d1
+	github.com/gcash/bchwallet/walletdb v1.0.0
 )
 
 require (
