@@ -142,6 +142,15 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}, nil
 }
 
+// Close closes the flat file of the store.  The store can not be used after it
+// is closed.
+func (h *headerStore) Close() error {
+	h.mtx.Lock()
+	defer h.mtx.Unlock()
+
+	return h.file.Close()
+}
+
 // blockHeaderStore is an implementation of the BlockHeaderStore interface, a
 // fully fledged database for Bitcoin block headers. The blockHeaderStore
 // combines a flat file to store the block headers with a database instance for

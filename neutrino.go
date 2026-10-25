@@ -6,6 +6,7 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -1611,6 +1612,20 @@ func (s *ChainService) Stop() error {
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
+
+	// Close the header files now that nothing uses them, so that a
+	// process that starts another ChainService on the same data directory
+	// does not keep them open.
+	if closer, ok := s.BlockHeaders.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			log.Errorf("Unable to close block header store: %v", err)
+		}
+	}
+	if s.RegFilterHeaders != nil {
+		if err := s.RegFilterHeaders.Close(); err != nil {
+			log.Errorf("Unable to close filter header store: %v", err)
+		}
+	}
 	return nil
 }
 
