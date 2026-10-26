@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/gcash/bchd v0.22.4-0.20261024085922-52bdb0e536bf
+	github.com/gcash/bchd v0.22.4-0.20261026050833-c12e3d66db71
 	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
 	github.com/gcash/bchutil v0.0.0-20261023042530-83c74af4dbd7
 	github.com/gcash/bchwallet v0.13.1-0.20261024010416-c857e5f8a0b2
