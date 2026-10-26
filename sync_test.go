@@ -337,7 +337,13 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit block: %s", err)
 	}
+	// This first sync includes the initial one, which takes longer when
+	// h1 wins the race to connect: neutrino then never drops h2 and h3,
+	// and waits QueryTimeout whenever they leave a cfheaders query for
+	// h1's chain unanswered.
+	syncTimeout *= 2
 	err = waitForSync(t, harness.svc, harness.h1)
+	syncTimeout /= 2
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
@@ -1115,6 +1121,10 @@ func TestNeutrinoSync(t *testing.T) {
 	neutrino.MaxPeers = 3
 	neutrino.BanDuration = 5 * time.Second
 	neutrino.QueryPeerConnectTimeout = 10 * time.Second
+	// A peer that times out on the initial cfheaders batch sits out the
+	// rest of it, so the batch reaches h1 rather than bouncing between h2
+	// and h3, which can't answer it.
+	neutrino.QueryPeerCooldown = time.Minute
 	svc, err := neutrino.NewChainService(config)
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
