@@ -758,69 +758,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// order to prevent it from becoming a public test network.
 	var newAddressFunc func() (net.Addr, error)
 	if !isDevNetwork(s.chainParams.Net) {
-		newAddressFunc = func() (net.Addr, error) {
-
-			// Gather our set of currently connected peers to avoid
-			// connecting to them again.
-			connectedPeers := make(map[string]struct{})
-			for _, peer := range s.Peers() {
-				peerAddr := addrmgr.NetAddressKey(peer.NA())
-				connectedPeers[peerAddr] = struct{}{}
-			}
-
-			for tries := 0; tries < 100; tries++ {
-				addr := s.addrManager.GetAddress()
-				if addr == nil {
-					break
-				}
-
-				// Ignore peers that we've already banned.
-				addrString := addrmgr.NetAddressKey(addr.NetAddress())
-				if s.IsBanned(addrString) {
-					log.Debugf("Ignoring banned peer: %v", addrString)
-					continue
-				}
-
-				// Skip any addresses that correspond to our set
-				// of currently connected peers.
-				if _, ok := connectedPeers[addrString]; ok {
-					continue
-				}
-
-				// The peer behind this address should support
-				// all of our required services.
-				if addr.Services()&RequiredServices != RequiredServices {
-					continue
-				}
-
-				// Address will not be invalid, local or unroutable
-				// because addrmanager rejects those on addition.
-				// Just check that we don't already have an address
-				// in the same group so that we are not connecting
-				// to the same network segment at the expense of
-				// others.
-				key := addrmgr.GroupKey(addr.NetAddress())
-				if s.OutboundGroupCount(key) != 0 {
-					continue
-				}
-
-				// only allow recent nodes (10mins) after we failed 30
-				// times
-				if tries < 30 && time.Since(addr.LastAttempt()) < 10*time.Minute {
-					continue
-				}
-
-				// allow nondefault ports after 50 failed tries.
-				if tries < 50 && fmt.Sprintf("%d", addr.NetAddress().Port) !=
-					s.chainParams.DefaultPort {
-					continue
-				}
-
-				return s.addrStringToNetAddr(addrString)
-			}
-
-			return nil, errors.New("no valid connect address")
-		}
+		newAddressFunc = s.newAddress
 	}
 
 	cmgrCfg := &connmgr.Config{
@@ -1489,11 +1427,83 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 	}
 }
 
+// newAddress picks the address of a peer to connect to from the address
+// manager and marks the attempt to connect to it, as bchd's server does.
+// Marking it only once a connection was made left an address that can't be
+// reached looking untried, so it came before the peers tried in the last 10
+// minutes, such as the one used before a restart, and the service could go
+// minutes without a peer.
+func (s *ChainService) newAddress() (net.Addr, error) {
+	// Gather our set of currently connected peers to avoid
+	// connecting to them again.
+	connectedPeers := make(map[string]struct{})
+	for _, peer := range s.Peers() {
+		peerAddr := addrmgr.NetAddressKey(peer.NA())
+		connectedPeers[peerAddr] = struct{}{}
+	}
+
+	for tries := 0; tries < 100; tries++ {
+		addr := s.addrManager.GetAddress()
+		if addr == nil {
+			break
+		}
+
+		// Ignore peers that we've already banned.
+		addrString := addrmgr.NetAddressKey(addr.NetAddress())
+		if s.IsBanned(addrString) {
+			log.Debugf("Ignoring banned peer: %v", addrString)
+			continue
+		}
+
+		// Skip any addresses that correspond to our set
+		// of currently connected peers.
+		if _, ok := connectedPeers[addrString]; ok {
+			continue
+		}
+
+		// The peer behind this address should support
+		// all of our required services.
+		if addr.Services()&RequiredServices != RequiredServices {
+			continue
+		}
+
+		// Address will not be invalid, local or unroutable
+		// because addrmanager rejects those on addition.
+		// Just check that we don't already have an address
+		// in the same group so that we are not connecting
+		// to the same network segment at the expense of
+		// others.
+		key := addrmgr.GroupKey(addr.NetAddress())
+		if s.OutboundGroupCount(key) != 0 {
+			continue
+		}
+
+		// only allow recent nodes (10mins) after we failed 30
+		// times
+		if tries < 30 && time.Since(addr.LastAttempt()) < 10*time.Minute {
+			continue
+		}
+
+		// allow nondefault ports after 50 failed tries.
+		if tries < 50 && fmt.Sprintf("%d", addr.NetAddress().Port) !=
+			s.chainParams.DefaultPort {
+			continue
+		}
+
+		// Mark the attempt before dialing, so that an address that
+		// can't be reached counts as tried.
+		s.addrManager.Attempt(addr.NetAddress())
+
+		return s.addrStringToNetAddr(addrString)
+	}
+
+	return nil, errors.New("no valid connect address")
+}
+
 // outboundPeerConnected is invoked by the connection manager when a new
 // outbound connection is established.  It initializes a new outbound server
-// peer instance, associates it with the relevant state such as the connection
-// request instance and the connection itself, and finally notifies the address
-// manager of the attempt.
+// peer instance and associates it with the relevant state such as the
+// connection request instance and the connection itself.
 func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
 	// If the peer is banned, then we'll disconnect them.
 	peerAddr := c.Addr.String()
@@ -1520,7 +1530,6 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	sp.connReq = c
 	sp.AssociateConnection(conn)
 	go s.peerDoneHandler(sp)
-	s.addrManager.Attempt(sp.NA())
 }
 
 // peerDoneHandler handles peer disconnects by notifiying the server that it's
