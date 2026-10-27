@@ -1525,6 +1525,7 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	if err != nil {
 		log.Debugf("Cannot create outbound peer %s: %s", c.Addr, err)
 		s.connManager.Disconnect(c.ID())
+		return
 	}
 	sp.Peer = p
 	sp.connReq = c
