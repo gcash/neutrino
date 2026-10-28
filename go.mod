@@ -4,10 +4,10 @@ go 1.26.0
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/gcash/bchd v0.22.4-0.20261028012448-b1b7702adb87
-	github.com/gcash/bchlog v0.0.0-20180913005452-b4f036f92fa6
-	github.com/gcash/bchutil v0.0.0-20261023042530-83c74af4dbd7
-	github.com/gcash/bchwallet v0.13.1-0.20261024010416-c857e5f8a0b2
+	github.com/gcash/bchd v0.22.4
+	github.com/gcash/bchlog v0.0.0-20261027020323-7b5704c0a60f
+	github.com/gcash/bchutil v0.0.0-20261028060706-e320ade87427
+	github.com/gcash/bchwallet v0.13.2-0.20261028013728-d29e5627b006
 	github.com/gcash/bchwallet/walletdb v1.0.0
 )
 
@@ -29,7 +29,7 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.32.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.33.0 // indirect
 	github.com/jessevdk/go-flags v1.6.1 // indirect
 	github.com/jrick/logrotate v1.1.2 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
@@ -40,15 +40,16 @@ require (
 	github.com/prometheus/procfs v0.23.0 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/traefik/grpc-web v0.18.0 // indirect
+	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	github.com/zquestz/grab v0.0.0-20190224022517-abcee96e61b1 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20261019180522-ce908d29299b // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b // indirect
-	google.golang.org/grpc v1.84.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20261026165753-2ffab32bce7e // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261026165753-2ffab32bce7e // indirect
+	google.golang.org/grpc v1.85.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	lukechampine.com/uint128 v1.3.0 // indirect
 )
