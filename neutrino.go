@@ -45,6 +45,12 @@ var (
 	// by the number of retries such that there is a retry backoff.
 	ConnectionRetryInterval = time.Second * 5
 
+	// ConnectTimeout is how long the default dialer waits for a peer to
+	// accept a connection, as in bchd, so that an address that doesn't
+	// answer gives up its connection slot instead of holding it until the
+	// operating system gives up, which takes minutes.
+	ConnectTimeout = time.Second * 30
+
 	// UserAgentName is the user agent name and is used to help identify
 	// ourselves to other bitcoin peers.
 	UserAgentName = "neutrino"
@@ -657,7 +663,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		dialer = cfg.Dialer
 	} else {
 		dialer = func(addr net.Addr) (net.Conn, error) {
-			return net.Dial(addr.Network(), addr.String())
+			return net.DialTimeout(addr.Network(), addr.String(),
+				ConnectTimeout)
 		}
 	}
 
@@ -1478,9 +1485,13 @@ func (s *ChainService) newAddress() (net.Addr, error) {
 			continue
 		}
 
-		// only allow recent nodes (10mins) after we failed 30
-		// times
-		if tries < 30 && time.Since(addr.LastAttempt()) < 10*time.Minute {
+		// Only allow an address attempted in the last 10 minutes
+		// after 30 failed tries, unless the attempt succeeded: the
+		// peer just lost, as to a network change, is the best one to
+		// connect to again, and often the only one that serves
+		// filters.
+		if tries < 30 && time.Since(addr.LastAttempt()) < 10*time.Minute &&
+			addr.LastSuccess().Before(addr.LastAttempt()) {
 			continue
 		}
 

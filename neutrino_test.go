@@ -48,20 +48,55 @@ func newTestService(t *testing.T) *ChainService {
 	}
 }
 
-// TestNewAddressAfterFailedDials checks that newAddress picks the peer tried in
-// the last 10 minutes, as by the run before a restart, again once its dials to
-// an address that can't be reached have failed.
+// TestNewAddressAfterFailedDials checks that newAddress counts an address it
+// picks as tried, so that it doesn't pick one whose dial failed again within
+// ten minutes while there are addresses it hasn't tried.
 func TestNewAddressAfterFailedDials(t *testing.T) {
 	s := newTestService(t)
-	good := wire.NewNetAddressV2IPPort(net.ParseIP("35.208.165.58"), 8333,
-		RequiredServices)
-	unreachable := wire.NewNetAddressV2IPPort(net.ParseIP("148.113.143.138"),
-		8333, RequiredServices)
-	s.addrManager.AddAddresses([]*wire.NetAddressV2{good, unreachable}, good)
-	s.addrManager.Good(good)
+	var addrs []*wire.NetAddressV2
+	for i := 0; i < 100; i++ {
+		addrs = append(addrs, wire.NewNetAddressV2IPPort(
+			net.IPv4(52, byte(i), 0, 1), 8333, RequiredServices))
+	}
+	s.addrManager.AddAddresses(addrs, addrs[0])
 
-	// No dial succeeds, so only newAddress can mark the attempts.
-	for i := 0; i < 50; i++ {
+	// No dial succeeds, so only newAddress can mark the attempts.  Thirty
+	// random picks of a hundred addresses would repeat one almost always.
+	picked := make(map[string]bool)
+	for i := 0; i < 30; i++ {
+		addr, err := s.newAddress()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if picked[addr.String()] {
+			t.Fatalf("pick %d: %v again, whose dial failed", i, addr)
+		}
+		picked[addr.String()] = true
+	}
+}
+
+// TestNewAddressAfterLostPeer checks that newAddress picks the peer the service
+// just lost, as to a network change, among addresses it never tried, instead of
+// passing it over for ten minutes because it was attempted when it connected.
+func TestNewAddressAfterLostPeer(t *testing.T) {
+	s := newTestService(t)
+	lost := wire.NewNetAddressV2IPPort(net.ParseIP("35.208.165.58"), 8333,
+		RequiredServices)
+	addrs := []*wire.NetAddressV2{lost}
+	for i := 0; i < 60; i++ {
+		addrs = append(addrs, wire.NewNetAddressV2IPPort(
+			net.IPv4(52, byte(i), 0, 1), 8333, RequiredServices))
+	}
+	s.addrManager.AddAddresses(addrs, lost)
+
+	// The peer connected a moment ago: newAddress marked the attempt, and
+	// the handshake marked it good.
+	s.addrManager.Attempt(lost)
+	s.addrManager.Good(lost)
+
+	// Each pick returns the lost peer or an address never tried, about
+	// evenly, so 20 picks miss it about once in a million runs.
+	for i := 0; i < 20; i++ {
 		addr, err := s.newAddress()
 		if err != nil {
 			t.Fatal(err)
@@ -70,7 +105,7 @@ func TestNewAddressAfterFailedDials(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("newAddress never picked the peer tried in the last 10 minutes")
+	t.Fatal("newAddress passed over the peer just lost for 20 picks")
 }
 
 // badAddr is an address that the peer package can't split into a host and a
