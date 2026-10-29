@@ -7,7 +7,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/peer"
 	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchutil/gcs"
@@ -857,5 +859,139 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		if err := assertBadPeers(expBad, badPeers); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// mineTestHeader returns a header that builds on prevHash with the simnet
+// proof of work limit, searching nonces until its hash meets that target.
+func mineTestHeader(t *testing.T, prevHash chainhash.Hash,
+	timestamp time.Time, extraNonce uint32) *wire.BlockHeader {
+
+	t.Helper()
+
+	target := blockchain.CompactToBig(chaincfg.SimNetParams.PowLimitBits)
+	header := &wire.BlockHeader{
+		Version:   1,
+		PrevBlock: prevHash,
+		Timestamp: timestamp,
+		Bits:      chaincfg.SimNetParams.PowLimitBits,
+	}
+	binary.BigEndian.PutUint32(header.MerkleRoot[:], extraNonce)
+	for nonce := uint32(0); nonce < 1000; nonce++ {
+		header.Nonce = nonce
+		hash := header.BlockHash()
+		if blockchain.HashToBig(&hash).Cmp(target) <= 0 {
+			return header
+		}
+	}
+
+	t.Fatalf("unable to find a nonce for header %d", extraNonce)
+	return nil
+}
+
+// TestBlockManagerReorgHeadersMustConnect checks that headers on the reorg
+// path only count toward a reorg when each one builds on the one before it.
+// A batch that doesn't link is rejected and leaves the chain as it was, while
+// the same amount of work in linked headers switches to the new branch.
+func TestBlockManagerReorgHeadersMustConnect(t *testing.T) {
+	t.Parallel()
+
+	bm, hdrStore, _, cleanUp, err := setupBlockManager()
+	if err != nil {
+		t.Fatalf("unable to set up block manager: %v", err)
+	}
+	defer cleanUp()
+
+	bm.server.blockManager = bm
+	bm.server.timeSource = blockchain.NewMedianTime()
+	bm.server.mempool = NewMempool()
+
+	// Drain the block notifications sent when a reorg rolls the chain
+	// back.
+	quit := make(chan struct{})
+	defer close(quit)
+	go func() {
+		for {
+			select {
+			case <-bm.blockNtfnChan:
+			case <-quit:
+				return
+			}
+		}
+	}()
+
+	sp := newServerPeer(bm.server, false)
+	sp.Peer, err = peer.NewOutboundPeer(
+		newPeerConfig(sp), "127.0.0.1:18555",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	genesis, _, err := hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesisHash := genesis.BlockHash()
+	now := time.Unix(time.Now().Unix(), 0)
+
+	// Build a known chain of two headers on top of genesis.
+	a1 := mineTestHeader(t, genesisHash, now.Add(-time.Hour), 1)
+	a2 := mineTestHeader(t, a1.BlockHash(), now.Add(-50*time.Minute), 2)
+	known := wire.NewMsgHeaders()
+	_ = known.AddBlockHeader(a1)
+	_ = known.AddBlockHeader(a2)
+	bm.handleHeadersMsg(&headersMsg{headers: known, peer: sp})
+
+	tip, height, err := hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if height != 2 || tip.BlockHash() != a2.BlockHash() {
+		t.Fatalf("expected tip %v at height 2, got %v at height %d",
+			a2.BlockHash(), tip.BlockHash(), height)
+	}
+
+	// A branch off genesis whose first header is new, followed by two
+	// headers that don't build on it, carries more work than the known
+	// chain but doesn't form a chain, so it must not cause a reorg.
+	b1 := mineTestHeader(t, genesisHash, now.Add(-40*time.Minute), 3)
+	unlinked := wire.NewMsgHeaders()
+	_ = unlinked.AddBlockHeader(b1)
+	_ = unlinked.AddBlockHeader(mineTestHeader(
+		t, chainhash.Hash{0x01}, now.Add(-30*time.Minute), 4,
+	))
+	_ = unlinked.AddBlockHeader(mineTestHeader(
+		t, chainhash.Hash{0x02}, now.Add(-20*time.Minute), 5,
+	))
+	bm.handleHeadersMsg(&headersMsg{headers: unlinked, peer: sp})
+
+	tip, height, err = hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if height != 2 || tip.BlockHash() != a2.BlockHash() {
+		t.Fatalf("headers that don't link changed the tip to %v "+
+			"at height %d", tip.BlockHash(), height)
+	}
+
+	// The same branch with headers that link to each other has more
+	// work than the known chain, so it replaces it.
+	b2 := mineTestHeader(t, b1.BlockHash(), now.Add(-30*time.Minute), 6)
+	b3 := mineTestHeader(t, b2.BlockHash(), now.Add(-20*time.Minute), 7)
+	linked := wire.NewMsgHeaders()
+	_ = linked.AddBlockHeader(b1)
+	_ = linked.AddBlockHeader(b2)
+	_ = linked.AddBlockHeader(b3)
+	bm.handleHeadersMsg(&headersMsg{headers: linked, peer: sp})
+
+	tip, height, err = hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if height != 3 || tip.BlockHash() != b3.BlockHash() {
+		t.Fatalf("expected tip %v at height 3 after the reorg, got "+
+			"%v at height %d", b3.BlockHash(), tip.BlockHash(),
+			height)
 	}
 }
