@@ -833,8 +833,8 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 }
 
 // extractBlockMatches fetches the target block from the network, and filters
-// out any relevant transactions found within the block.
-
+// out any relevant transactions found within the block. They are returned in
+// block order, which can list a transaction before one whose output it spends.
 func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 	curStamp *waddrmgr.BlockStamp) ([]*bchutil.Tx, error) {
 
@@ -849,19 +849,24 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 			"network", curStamp.Height, curStamp.Hash)
 	}
 
-	relevantTxs := make([]*bchutil.Tx, 0, len(block.Transactions()))
-	for _, tx := range block.Transactions() {
-		relevant := ro.spendsWatchedInput(tx)
-
-		// Even though the transaction may already be known as relevant,
-		// we need to call paysWatchedAddr anyway as it updates the
-		// rescan options.
-		pays, err := ro.paysWatchedAddr(tx)
+	// Since the canonical transaction ordering upgrade, blocks order their
+	// transactions by txid, so a transaction can spend an output of one that
+	// comes after it. paysWatchedAddr watches every output that pays a
+	// watched address, so it goes over the whole block before
+	// spendsWatchedInput checks any inputs. It runs for every transaction,
+	// relevant or not, since it updates the rescan options.
+	txs := block.Transactions()
+	pays := make([]bool, len(txs))
+	for i, tx := range txs {
+		pays[i], err = ro.paysWatchedAddr(tx)
 		if err != nil {
 			return nil, err
 		}
+	}
 
-		if relevant || pays {
+	relevantTxs := make([]*bchutil.Tx, 0, len(txs))
+	for i, tx := range txs {
+		if pays[i] || ro.spendsWatchedInput(tx) {
 			relevantTxs = append(relevantTxs, tx)
 		}
 	}
