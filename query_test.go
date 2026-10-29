@@ -275,11 +275,19 @@ func TestBlockCache(t *testing.T) {
 		}
 	}
 
+	// No filter headers are synced, so blocks aren't checked against them.
+	_, _, cfStore, cleanUp, err := setupBlockManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanUp()
+
 	// Set up a ChainService with a BlockCache that can fit the first half
 	// of the blocks.
 	cs := &ChainService{
-		BlockCache:   lru.NewCache(size),
-		BlockHeaders: headers,
+		BlockCache:       lru.NewCache(size),
+		BlockHeaders:     headers,
+		RegFilterHeaders: cfStore,
 		chainParams: chaincfg.Params{
 			PowLimit: maxPowLimit,
 		},

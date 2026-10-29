@@ -1394,6 +1394,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		return nil, fmt.Errorf("couldn't retrieve block %s from network", blockHash)
 	}
 
+	// Check the block against its filter header, since filters are only
+	// as good as the filter headers synced for them.
+	if err := s.verifyBlockFilter(foundBlock, height); err != nil {
+		return nil, err
+	}
+
 	// Add block to the cache before returning it.
 	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
 	if err != nil {
