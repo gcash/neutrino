@@ -287,8 +287,7 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
 	peerServices := sp.Services()
-	if peerServices&wire.SFNodeCF != wire.SFNodeCF || peerServices&wire.SFNodeBloom != wire.SFNodeBloom {
-
+	if peerServices&wire.SFNodeCF != wire.SFNodeCF {
 		peerAddr := sp.Addr()
 		err := sp.server.BanPeer(peerAddr, banman.NoCompactFilters)
 		if err != nil {
@@ -971,7 +970,8 @@ func (s *ChainService) NotifyMempoolReceived(addrs []bchutil.Address) {
 	s.mempool.NotifyReceived(addrs)
 }
 
-// RequestMempoolFilter requests the mempool filter from a single peer.
+// RequestMempoolFilter requests the mempool filter from a single peer that
+// advertises bloom filter support.
 func (s *ChainService) RequestMempoolFilter(addrs []bchutil.Address) {
 	go s.requestMempoolFilter(addrs)
 }
@@ -986,6 +986,13 @@ func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
 	// detect our transaction.
 	for _, peer := range s.Peers() {
 		if peer == nil || !peer.Connected() {
+			continue
+		}
+
+		// A match is followed by a mempool message, which only peers
+		// with bloom filter support serve. bchd disconnects a peer that
+		// sends it one while running without bloom filters.
+		if peer.Services()&wire.SFNodeBloom != wire.SFNodeBloom {
 			continue
 		}
 
