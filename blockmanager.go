@@ -120,6 +120,21 @@ type txMsg struct {
 	peer *ServerPeer
 }
 
+// notFoundMsg packages a bitcoin notfound message, with which a peer answers
+// that it doesn't have what it was asked for, and the peer it came from.
+type notFoundMsg struct {
+	notFound *wire.MsgNotFound
+	peer     *ServerPeer
+}
+
+// txRequest is an unconfirmed transaction that the block manager asked a peer
+// for, with the other peers that announced it since, which it asks next if the
+// peer doesn't send it.
+type txRequest struct {
+	peer       *ServerPeer
+	announcers []*ServerPeer
+}
+
 // blockManager provides a concurrency safe block manager for handling all
 // incoming blocks.
 type blockManager struct {
@@ -228,7 +243,7 @@ type blockManager struct {
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
 
-	requestedTxns map[chainhash.Hash]struct{}
+	requestedTxns map[chainhash.Hash]*txRequest
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -261,7 +276,7 @@ func newBlockManager(s *ChainService,
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
-		requestedTxns:       make(map[chainhash.Hash]struct{}),
+		requestedTxns:       make(map[chainhash.Hash]*txRequest),
 		firstPeerSignal:     firstPeerSignal,
 	}
 
@@ -467,6 +482,15 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	}
 
 	log.Infof("Lost peer %s", sp)
+
+	// Ask other peers for the transactions that sp was asked for, and no
+	// longer count on it for the others.
+	for hash, req := range b.requestedTxns {
+		req.announcers = withoutPeer(req.announcers, sp)
+		if req.peer == sp {
+			b.askNextAnnouncer(hash, req)
+		}
+	}
 
 	// Attempt to find a new peer to sync from if the quitting peer is the
 	// sync peer.  Also, reset the header state.
@@ -1826,6 +1850,9 @@ out:
 			case *txMsg:
 				b.handleTxMsg(msg)
 
+			case *notFoundMsg:
+				b.handleNotFoundMsg(msg)
+
 			case *headersMsg:
 				b.handleHeadersMsg(msg)
 
@@ -2116,14 +2143,8 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	if b.BlockHeadersSynced() {
 		gdmsg := wire.NewMsgGetData()
 		for _, iv := range invVects {
-			if iv.Type == wire.InvTypeTx {
-				if b.server.mempool.HaveTransaction(&iv.Hash) {
-					continue
-				}
-				if _, exists := b.requestedTxns[iv.Hash]; !exists {
-					b.requestedTxns[iv.Hash] = struct{}{}
-					_ = gdmsg.AddInvVect(iv)
-				}
+			if iv.Type == wire.InvTypeTx && b.wantTx(imsg.peer, iv.Hash) {
+				_ = gdmsg.AddInvVect(iv)
 			}
 		}
 		if len(gdmsg.InvList) > 0 {
@@ -2207,6 +2228,87 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 				return
 			}
 			b.lastRequested = invVects[lastBlock].Hash
+		}
+	}
+}
+
+// wantTx returns whether to ask sp for the transaction it announced: unless
+// the mempool has it, or another peer was asked for it, which then remembers sp
+// to ask instead if that peer doesn't send it.
+func (b *blockManager) wantTx(sp *ServerPeer, hash chainhash.Hash) bool {
+	if b.server.mempool.HaveTransaction(&hash) {
+		return false
+	}
+	req, ok := b.requestedTxns[hash]
+	if !ok {
+		b.requestedTxns[hash] = &txRequest{peer: sp}
+		return true
+	}
+	if req.peer != sp && !hasPeer(req.announcers, sp) {
+		req.announcers = append(req.announcers, sp)
+	}
+	return false
+}
+
+// askNextAnnouncer asks the next peer that announced the transaction for it,
+// as the peer asked won't send it, or forgets the request when no other peer
+// announced it, so that a later announcement asks for it again.
+func (b *blockManager) askNextAnnouncer(hash chainhash.Hash, req *txRequest) {
+	if len(req.announcers) == 0 {
+		delete(b.requestedTxns, hash)
+		return
+	}
+	req.peer, req.announcers = req.announcers[0], req.announcers[1:]
+	gdmsg := wire.NewMsgGetData()
+	_ = gdmsg.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &hash))
+	req.peer.QueueMessage(gdmsg, nil)
+}
+
+// hasPeer returns whether peers has sp.
+func hasPeer(peers []*ServerPeer, sp *ServerPeer) bool {
+	for _, p := range peers {
+		if p == sp {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutPeer returns peers without sp.
+func withoutPeer(peers []*ServerPeer, sp *ServerPeer) []*ServerPeer {
+	var others []*ServerPeer
+	for _, p := range peers {
+		if p != sp {
+			others = append(others, p)
+		}
+	}
+	return others
+}
+
+// QueueNotFound adds the passed notfound message and peer to the block handling
+// queue.
+func (b *blockManager) QueueNotFound(notFound *wire.MsgNotFound, sp *ServerPeer) {
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
+	select {
+	case b.peerChan <- &notFoundMsg{notFound: notFound, peer: sp}:
+	case <-b.quit:
+		return
+	}
+}
+
+// handleNotFoundMsg asks other peers for the transactions that a peer answered
+// it doesn't have, as one that was mined or dropped from its mempool.
+func (b *blockManager) handleNotFoundMsg(nmsg *notFoundMsg) {
+	for _, iv := range nmsg.notFound.InvList {
+		if iv.Type != wire.InvTypeTx {
+			continue
+		}
+		req, ok := b.requestedTxns[iv.Hash]
+		if ok && req.peer == nmsg.peer {
+			b.askNextAnnouncer(iv.Hash, req)
 		}
 	}
 }
