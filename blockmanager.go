@@ -2356,8 +2356,19 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		Add(maxTimeOffset)
 
 	// We'll attempt to write the entire batch of validated headers
-	// atomically in order to improve peformance.
+	// atomically in order to improve performance.
 	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(msg.Headers))
+
+	// Check that each header in the message builds on the one before it.
+	// The reorg path below counts the work of the remaining headers before
+	// it links them, so headers that don't form a chain must be rejected
+	// up front.
+	if !areHeadersConnected(msg.Headers) {
+		log.Warnf("Headers received from peer %s don't connect to "+
+			"each other -- disconnecting", hmsg.peer.Addr())
+		hmsg.peer.Disconnect()
+		return
+	}
 
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
@@ -2685,6 +2696,18 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// Clear the mempool to free up memory. This may mean we might receive
 	// transactions we've previously downloaded but this is rather unlikely.
 	b.server.mempool.Clear()
+}
+
+// areHeadersConnected returns true if each of the passed block headers builds
+// on the one before it.
+func areHeadersConnected(headers []*wire.BlockHeader) bool {
+	for i := 1; i < len(headers); i++ {
+		if headers[i].PrevBlock != headers[i-1].BlockHash() {
+			return false
+		}
+	}
+
+	return true
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
