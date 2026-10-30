@@ -68,11 +68,9 @@ type NotificationSource interface {
 // client no longer wishes to receive any notifications.
 type Subscription struct {
 	// Notifications is the channel through which block notifications will
-	// be sent through.
-	//
-	// TODO(wilmer): make read-only chan once we remove
-	// resetBlockReFetchTimer hack from rescan.
-	Notifications chan BlockNtfn
+	// be sent through. Only the SubscriptionManager sends on it, as it
+	// closes the channel once the subscription is canceled.
+	Notifications <-chan BlockNtfn
 
 	// Cancel is closure that can be invoked to cancel the client's desire
 	// to receive notifications.
