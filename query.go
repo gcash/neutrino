@@ -1265,17 +1265,22 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// We'll return immediately to the caller when the filter arrives.
 	case filter, ok = <-query.filterChan:
 		if !ok {
-			// TODO(halseth): return error?
-			return nil, nil
+			// The query ended without the filter, either because
+			// we're shutting down or because no peer sent it.
+			select {
+			case <-s.quit:
+				return nil, ErrShuttingDown
+			default:
+			}
+
+			return nil, ErrFilterFetchFailed
 		}
 
 		return filter, nil
 
 	case <-s.quit:
-		// TODO(halseth): return error?
-		return nil, nil
+		return nil, ErrShuttingDown
 	}
-
 }
 
 // GetBlock gets a block by requesting it from the network, one peer at a

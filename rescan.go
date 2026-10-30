@@ -1098,8 +1098,6 @@ func matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
 func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 
-	// TODO(roasbeef): need to ENSURE always get filter
-
 	// Since this method is called when we are not current, and from the
 	// utxoscanner, we expect more calls to follow for the subsequent
 	// filters. To speed up the fetching, we make an optimistic batch
@@ -1115,9 +1113,14 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 		return false, err
 	}
 
-	// If we found the filter, then we'll check the items in the watch list
-	// against it.
-	if filter != nil && filter.N() != 0 {
+	// Without the filter we can't tell whether the block matches, so
+	// we'll report it as a failed fetch rather than as no match.
+	if filter == nil {
+		return false, ErrFilterFetchFailed
+	}
+
+	// We'll check the items in the watch list against the filter.
+	if filter.N() != 0 {
 		return matchBlockFilter(ro, filter, blockHash)
 	}
 

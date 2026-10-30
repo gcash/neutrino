@@ -3,6 +3,7 @@ package neutrino
 import (
 	"compress/bzip2"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -19,6 +20,7 @@ import (
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
+	"github.com/gcash/bchwallet/walletdb"
 	"github.com/gcash/neutrino/cache"
 	"github.com/gcash/neutrino/cache/lru"
 	"github.com/gcash/neutrino/filterdb"
@@ -414,4 +416,103 @@ func TestBlockCache(t *testing.T) {
 	// size.
 	b := blocks[0]
 	fetchAndAssertPeersQueried(*b.Hash())
+}
+
+// TestGetCFilterNotFetched checks that GetCFilter returns an error when no peer
+// sends the filter it asks for, or when the ChainService is shutting down. It
+// returned no filter and no error, which callers took for a block that matches
+// nothing.
+func TestGetCFilterNotFetched(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	db, err := walletdb.Create("bdb", filepath.Join(tempDir, "weks.db"), true)
+	if err != nil {
+		t.Fatalf("unable to create db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	hdrStore, err := headerfs.NewBlockHeaderStore(
+		tempDir, db, &chaincfg.SimNetParams,
+	)
+	if err != nil {
+		t.Fatalf("unable to create block header store: %v", err)
+	}
+	cfStore, err := headerfs.NewFilterHeaderStore(
+		tempDir, db, headerfs.RegularFilter, &chaincfg.SimNetParams,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("unable to create filter header store: %v", err)
+	}
+	filterDB, err := filterdb.New(db, chaincfg.SimNetParams)
+	if err != nil {
+		t.Fatalf("unable to create filter db: %v", err)
+	}
+
+	// Add a block above genesis with its filter header, so that GetCFilter
+	// asks peers for its filter.
+	genesis, _, err := hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := wire.BlockHeader{PrevBlock: genesis.BlockHash(), Nonce: 1}
+	err = hdrStore.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &header,
+		Height:      1,
+	})
+	if err != nil {
+		t.Fatalf("unable to write block header: %v", err)
+	}
+	err = cfStore.WriteHeaders(headerfs.FilterHeader{
+		HeaderHash: header.BlockHash(),
+		FilterHash: chainhash.Hash{1},
+		Height:     1,
+	})
+	if err != nil {
+		t.Fatalf("unable to write filter header: %v", err)
+	}
+
+	for _, shutdown := range []bool{false, true} {
+		cs := &ChainService{
+			FilterDB:         filterDB,
+			FilterCache:      lru.NewCache(1000),
+			BlockHeaders:     hdrStore,
+			RegFilterHeaders: cfStore,
+			quit:             make(chan struct{}),
+		}
+
+		// No peer answers the query.
+		queried := make(chan struct{}, 1)
+		cs.queryPeers = func(wire.Message, func(*ServerPeer,
+			wire.Message, chan<- struct{}), ...QueryOption) {
+
+			queried <- struct{}{}
+		}
+		if shutdown {
+			close(cs.quit)
+		}
+
+		want := ErrFilterFetchFailed
+		if shutdown {
+			want = ErrShuttingDown
+		}
+		filter, err := cs.GetCFilter(
+			header.BlockHash(), wire.GCSFilterRegular,
+		)
+		if filter != nil || !errors.Is(err, want) {
+			t.Fatalf("shutdown=%v: expected error %v, got filter "+
+				"%v and error %v", shutdown, want, filter, err)
+		}
+
+		// Unless the ChainService was shutting down, which can end
+		// the wait before the query starts, peers were asked.
+		if !shutdown {
+			select {
+			case <-queried:
+			default:
+				t.Fatal("expected peers to be queried")
+			}
+		}
+	}
 }

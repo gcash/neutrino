@@ -8,4 +8,8 @@ var (
 
 	// ErrShuttingDown signals that neutrino received a shutdown request.
 	ErrShuttingDown = errors.New("neutrino shutting down")
+
+	// ErrFilterFetchFailed signals that no peer sent a compact filter that
+	// was asked for.
+	ErrFilterFetchFailed = errors.New("unable to fetch cfilter")
 )
