@@ -1084,7 +1084,7 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 	}
 
 	for uint32(bs.Height) > height {
-		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
+		header, headerHeight, err := s.BlockHeaders.FetchHeader(&bs.Hash)
 		if err != nil {
 			return nil, err
 		}

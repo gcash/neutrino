@@ -1462,3 +1462,126 @@ func TestTxRequestsRetried(t *testing.T) {
 		t.Fatal("a later announcement doesn't ask for the transaction")
 	}
 }
+
+// TestRollBackToHeightDisconnectedHeights checks that rolling back several
+// blocks sends a disconnected notification for each block with that block's
+// own height and the header that becomes the new tip.
+func TestRollBackToHeightDisconnectedHeights(t *testing.T) {
+	t.Parallel()
+
+	bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
+	if err != nil {
+		t.Fatalf("unable to set up ChainService: %v", err)
+	}
+	defer cleanUp()
+	bm.server.blockManager = bm
+
+	genesis, _, err := hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a chain of four blocks on top of genesis, with filter headers
+	// for each, so both stores are rolled back.
+	const tipHeight = 4
+	chain := []wire.BlockHeader{*genesis}
+	var (
+		blockHeaders  []headerfs.BlockHeader
+		filterHeaders []headerfs.FilterHeader
+	)
+	filterHeader := *genesisFilterHeader
+	for height := uint32(1); height <= tipHeight; height++ {
+		header := wire.BlockHeader{
+			PrevBlock: chain[height-1].BlockHash(),
+			Nonce:     height,
+		}
+		chain = append(chain, header)
+		blockHeaders = append(blockHeaders, headerfs.BlockHeader{
+			BlockHeader: &chain[height],
+			Height:      height,
+		})
+		filterHeader = chainhash.DoubleHashH(filterHeader[:])
+		filterHeaders = append(filterHeaders, headerfs.FilterHeader{
+			HeaderHash: header.BlockHash(),
+			FilterHash: filterHeader,
+			Height:     height,
+		})
+	}
+	if err := hdrStore.WriteHeaders(blockHeaders...); err != nil {
+		t.Fatalf("unable to write block headers: %v", err)
+	}
+	if err := cfStore.WriteHeaders(filterHeaders...); err != nil {
+		t.Fatalf("unable to write filter headers: %v", err)
+	}
+
+	// The notification channel is unbuffered, so roll back in the
+	// background and read the notifications here.
+	const rollBackTo = 1
+	errChan := make(chan error, 1)
+	go func() {
+		_, err := bm.server.rollBackToHeight(rollBackTo)
+		errChan <- err
+	}()
+
+	for height := uint32(tipHeight); height > rollBackTo; height-- {
+		var ntfn blockntfns.BlockNtfn
+		select {
+		case ntfn = <-bm.blockNtfnChan:
+		case err := <-errChan:
+			t.Fatalf("rollback ended before the notification for "+
+				"height %d: %v", height, err)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no notification for height %d", height)
+		}
+
+		disconnected, ok := ntfn.(*blockntfns.Disconnected)
+		if !ok {
+			t.Fatalf("expected a disconnected notification, got %v",
+				ntfn)
+		}
+		if disconnected.Height() != height {
+			t.Fatalf("disconnected notification has height %d, "+
+				"expected %d", disconnected.Height(), height)
+		}
+		header := disconnected.Header()
+		if header.BlockHash() != chain[height].BlockHash() {
+			t.Fatalf("disconnected notification at height %d has "+
+				"the wrong header", height)
+		}
+		tip := disconnected.ChainTip()
+		if tip.BlockHash() != chain[height-1].BlockHash() {
+			t.Fatalf("disconnected notification at height %d has "+
+				"the wrong new tip", height)
+		}
+	}
+
+	select {
+	case err := <-errChan:
+		if err != nil {
+			t.Fatalf("unable to roll back: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rollback did not finish")
+	}
+
+	_, height, err := hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if height != rollBackTo {
+		t.Fatalf("block header tip at height %d, expected %d", height,
+			rollBackTo)
+	}
+	_, height, err = cfStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if height != rollBackTo {
+		t.Fatalf("filter header tip at height %d, expected %d", height,
+			rollBackTo)
+	}
+}
