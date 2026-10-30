@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"container/list"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -993,5 +994,62 @@ func TestBlockManagerReorgHeadersMustConnect(t *testing.T) {
 		t.Fatalf("expected tip %v at height 3 after the reorg, got "+
 			"%v at height %d", b3.BlockHash(), tip.BlockHash(),
 			height)
+// TestTxRequestsRetried checks that the block manager asks another peer that
+// announced an unconfirmed transaction for it when the peer it asked
+// disconnects or answers that it doesn't have it, and asks again on a later
+// announcement once no peer is left to ask. It asked a transaction of a peer
+// only once, and then never again, however many peers announced it.
+func TestTxRequestsRetried(t *testing.T) {
+	newPeer := func(addr string) *ServerPeer {
+		p, err := peer.NewOutboundPeer(&peer.Config{}, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &ServerPeer{Peer: p}
+	}
+	first := newPeer("10.0.0.1:18333")
+	second := newPeer("10.0.0.2:18333")
+	third := newPeer("10.0.0.3:18333")
+
+	bm := &blockManager{
+		server:        &ChainService{mempool: NewMempool()},
+		requestedTxns: make(map[chainhash.Hash]*txRequest),
+	}
+	hash := chainhash.Hash{1}
+	asked := func() *ServerPeer {
+		if req := bm.requestedTxns[hash]; req != nil {
+			return req.peer
+		}
+		return nil
+	}
+	notFound := func(sp *ServerPeer) {
+		msg := wire.NewMsgNotFound()
+		_ = msg.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &hash))
+		bm.handleNotFoundMsg(&notFoundMsg{notFound: msg, peer: sp})
+	}
+
+	if !bm.wantTx(first, hash) {
+		t.Fatal("the first announcement of the transaction doesn't ask for it")
+	}
+	if bm.wantTx(second, hash) || bm.wantTx(third, hash) {
+		t.Fatal("later announcements ask for the transaction again")
+	}
+
+	bm.handleDonePeerMsg(list.New(), first)
+	if asked() != second {
+		t.Fatalf("asked %v once the first peer disconnected, want the second",
+			asked())
+	}
+	notFound(second)
+	if asked() != third {
+		t.Fatalf("asked %v once the second peer didn't have it, want the "+
+			"third", asked())
+	}
+	notFound(third)
+	if asked() != nil {
+		t.Fatalf("still waiting for %v, which didn't have it", asked())
+	}
+	if !bm.wantTx(second, hash) {
+		t.Fatal("a later announcement doesn't ask for the transaction")
 	}
 }
