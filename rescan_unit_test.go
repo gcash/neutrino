@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/txscript"
@@ -79,5 +80,55 @@ func TestExtractBlockMatchesSpendBeforeParent(t *testing.T) {
 	}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("matched %v, want the spend and its parent %v", got, want)
+	}
+}
+
+// TestMatchesTokenOutputs checks that a transaction that pays a watched
+// address with an output carrying CashTokens is found, in a block and in the
+// mempool. It goes through the wire encoding, which carries the token prefix in
+// the output's script, as from a peer.
+func TestMatchesTokenOutputs(t *testing.T) {
+	watched, watchedScript := payTo(t, 1)
+	tokens := wire.TokenData{CategoryID: [32]byte{1}, Amount: 1000,
+		BitField: wire.HAS_AMOUNT}
+
+	sent := wire.NewMsgTx(2)
+	sent.AddTxIn(wire.NewTxIn(&wire.OutPoint{Hash: chainhash.Hash{1}}, nil))
+	sent.AddTxOut(wire.NewTxOut(1000, watchedScript, tokens))
+	var buf bytes.Buffer
+	if err := sent.Serialize(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var tx wire.MsgTx
+	if err := tx.Deserialize(bytes.NewReader(buf.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	if tx.TxOut[0].TokenData.IsEmpty() {
+		t.Fatal("the decoded output carries no tokens")
+	}
+
+	chain := &blockSource{block: &wire.MsgBlock{
+		Transactions: []*wire.MsgTx{&tx},
+	}}
+	ro := &rescanOptions{watchAddrs: []bchutil.Address{watched}}
+	txs, err := extractBlockMatches(chain, ro, &waddrmgr.BlockStamp{Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txs) != 1 {
+		t.Errorf("matched %d transactions in the block, want the one "+
+			"paying tokens", len(txs))
+	}
+
+	mempool := NewMempool()
+	mempool.NotifyReceived([]bchutil.Address{watched})
+	var reported int
+	mempool.RegisterCallback(func(*bchutil.Tx, *btcjson.BlockDetails) {
+		reported++
+	})
+	mempool.AddTransaction(bchutil.NewTx(&tx))
+	if reported != 1 {
+		t.Errorf("the mempool reported %d transactions, want the one "+
+			"paying tokens", reported)
 	}
 }
