@@ -29,7 +29,9 @@ var (
 	ErrRescanExit = errors.New("rescan exited")
 
 	// errRetryBlock is an internal error used to signal to the rescan
-	// should it should attempt to retry processing a block.
+	// that it should attempt to retry processing a block. It is returned
+	// whenever the block's filter or the block itself could not be fetched
+	// from the network, which is considered a transient failure.
 	errRetryBlock = errors.New("block must be retried")
 )
 
@@ -558,23 +560,21 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		blockFilter, err := chain.GetCFilter(
 			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
 		)
-
-		switch {
-		// If the block index doesn't know about this block, then it's
-		// likely we're mid re-org so we'll accept this as we account
-		// for it below.
-		case err == headerfs.ErrHashNotFound:
-
-		case err != nil:
-			return fmt.Errorf("unable to get filter for hash=%v: %v",
-				curStamp.Hash, err)
+		if errors.Is(err, ErrShuttingDown) {
+			return err
 		}
 
-		// If the filter is nil, then this either means that we don't
-		// have any peers to fetch this filter from, or the peer(s) that
-		// we're trying to fetch from are in the progress of a re-org.
+		// If the query failed or found no filter, then this either
+		// means that we don't have any peers to fetch this filter from,
+		// or the peer(s) that we're trying to fetch from are in the
+		// progress of a re-org, so we'll retry the block.
+		if err != nil {
+			return fmt.Errorf("%w: unable to get filter for hash=%v: "+
+				"%w", errRetryBlock, newStamp.Hash, err)
+		}
 		if blockFilter == nil {
-			return errRetryBlock
+			return fmt.Errorf("%w: no filter for hash=%v",
+				errRetryBlock, newStamp.Hash)
 		}
 
 		err = notifyBlockWithFilter(
@@ -696,14 +696,18 @@ rescanLoop:
 					}
 
 					err := handleBlockConnected(ntfn)
-					switch err {
-					case nil:
+					switch {
+					case err == nil:
+
+					case errors.Is(err, ErrShuttingDown):
+						return err
 
 					// We'll need to retry the block again
-					// as we couldn't fetch its filter.
-					case errRetryBlock:
-						log.Debugf("Retrying %v after %v",
-							ntfn, blockRetryInterval)
+					// as we couldn't fetch its filter or
+					// the block itself.
+					case errors.Is(err, errRetryBlock):
+						log.Debugf("Retrying %v after %v: %v",
+							ntfn, blockRetryInterval, err)
 						blockRetryQueue.push(ntfn)
 						blockRetrySignal = time.After(
 							blockRetryInterval,
@@ -757,20 +761,24 @@ rescanLoop:
 					}
 
 					err := handleBlockConnected(retryBlock)
-					switch err {
+					switch {
 					// We successfully notified the block
 					// this time, so we can remove it from
 					// our queue and move on to the next.
-					case nil:
+					case err == nil:
 						_ = blockRetryQueue.pop()
 						continue retryLoop
 
+					case errors.Is(err, ErrShuttingDown):
+						return err
+
 					// We'll need to retry the block again
-					// as we couldn't fetch its filter.
-					case errRetryBlock:
+					// as we couldn't fetch its filter or
+					// the block itself.
+					case errors.Is(err, errRetryBlock):
 						log.Debugf("Retrying %v after "+
-							"%v", retryBlock,
-							blockRetryInterval)
+							"%v: %v", retryBlock,
+							blockRetryInterval, err)
 						blockRetrySignal = time.After(
 							blockRetryInterval,
 						)
@@ -864,6 +872,9 @@ rescanLoop:
 				return err
 			}
 
+			// Advance our state to the next block, but remember
+			// where we were in case we need to retry it.
+			prevHeader, prevStamp := curHeader, curStamp
 			curHeader = *header
 			curStamp.Height++
 			curStamp.Hash = header.BlockHash()
@@ -872,10 +883,55 @@ rescanLoop:
 				scanning = ro.startTime.Before(curHeader.Timestamp)
 			}
 			err = notifyBlock(chain, ro, curHeader, curStamp, scanning)
-			if err != nil {
+			switch {
+			case err == nil:
+
+			// We couldn't fetch the block's filter or the block
+			// itself from the network. This is usually transient,
+			// as when we have no peers or they didn't respond, so
+			// rather than ending the rescan for good we'll rewind
+			// our state and retry the block after a short delay.
+			case errors.Is(err, errRetryBlock):
+				log.Errorf("Unable to process block %d (%s), "+
+					"retrying after %v: %v", curStamp.Height,
+					curStamp.Hash, blockRetryInterval, err)
+
+				curHeader = prevHeader
+				curStamp = prevStamp
+
+				err := waitForRetry(
+					chain, ro, &curStamp, &curHeader,
+					blockRetryInterval,
+				)
+				if err != nil {
+					return err
+				}
+
+			default:
 				return err
 			}
 		}
+	}
+}
+
+// waitForRetry waits for the given interval before a block is retried while
+// catching up with the chain. Filter updates received in the meantime are
+// applied right away, so that callers of Update aren't blocked by a block we're
+// unable to fetch, in which case the wait is cut short.
+func waitForRetry(chain ChainSource, ro *rescanOptions,
+	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader,
+	interval time.Duration) error {
+
+	select {
+	case <-ro.quit:
+		return ErrRescanExit
+
+	case update := <-ro.update:
+		_, err := ro.updateFilter(chain, update, curStamp, curHeader)
+		return err
+
+	case <-time.After(interval):
+		return nil
 	}
 }
 
@@ -892,8 +948,18 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 		// matches the rescan's filters, so we get the basic filter
 		// from the DB or network.
 		matched, err := blockFilterMatches(chain, ro, &curStamp.Hash)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrShuttingDown):
 			return err
+
+		// If the query failed, then this either means that we don't
+		// have any peers to fetch this filter from, or the peer(s) we
+		// asked didn't respond, so we'll signal the block should be
+		// retried.
+		case err != nil:
+			return fmt.Errorf("%w: unable to get filter for block "+
+				"%d (%s): %w", errRetryBlock, curStamp.Height,
+				curStamp.Hash, err)
 		}
 
 		if matched {
@@ -923,12 +989,23 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
 	block, err := chain.GetBlock(curStamp.Hash, ro.queryOptions...)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrShuttingDown):
 		return nil, err
-	}
-	if block == nil {
-		return nil, fmt.Errorf("couldn't get block %d (%s) from "+
-			"network", curStamp.Height, curStamp.Hash)
+
+	// If we couldn't fetch the block, or it doesn't match its filter
+	// header, then this either means that we don't have any peers to
+	// fetch it from, or the peer(s) we asked didn't respond or served
+	// the wrong filter headers. This is transient, so we'll signal the
+	// block should be retried rather than ending the rescan.
+	case err != nil:
+		return nil, fmt.Errorf("%w: couldn't get block %d (%s): %w",
+			errRetryBlock, curStamp.Height, curStamp.Hash, err)
+
+	case block == nil:
+		return nil, fmt.Errorf("%w: couldn't get block %d (%s) from "+
+			"network", errRetryBlock, curStamp.Height,
+			curStamp.Hash)
 	}
 
 	// Since the canonical transaction ordering upgrade, blocks order their

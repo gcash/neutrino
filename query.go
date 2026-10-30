@@ -1391,6 +1391,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		options...,
 	)
 	if foundBlock == nil {
+		select {
+		case <-s.quit:
+			return nil, ErrShuttingDown
+		default:
+		}
+
 		return nil, fmt.Errorf("couldn't retrieve block %s from network", blockHash)
 	}
 
