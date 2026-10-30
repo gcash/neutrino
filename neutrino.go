@@ -345,6 +345,13 @@ func (sp *ServerPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 	}
 }
 
+// OnNotFound is invoked when a peer answers that it doesn't have what it was
+// asked for, as for a transaction it announced and then dropped. The block
+// manager asks another peer for such a transaction.
+func (sp *ServerPeer) OnNotFound(_ *peer.Peer, msg *wire.MsgNotFound) {
+	sp.server.blockManager.QueueNotFound(msg, sp)
+}
+
 // OnTx is invoked when a peer sends us a new transaction. We will will pass it
 // into the blockmanager for further processing.
 func (sp *ServerPeer) OnTx(_ *peer.Peer, msg *wire.MsgTx) {
@@ -1421,6 +1428,7 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			OnRead:      sp.OnRead,
 			OnWrite:     sp.OnWrite,
 			OnTx:        sp.OnTx,
+			OnNotFound:  sp.OnNotFound,
 		},
 		NewestBlock:      sp.newestBlock,
 		HostToNetAddress: sp.server.addrManager.HostToNetAddress,
