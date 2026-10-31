@@ -72,6 +72,15 @@ type ChainSource interface {
 	//
 	// TODO(wilmer): extend with best hash as well.
 	Subscribe(bestHeight uint32) (*blockntfns.Subscription, error)
+
+	// SubscribeFilterHeaderRollbacks returns a channel that receives the
+	// height the filter headers were rolled back to each time a repair
+	// finds that they were wrong above it, along with a function that
+	// cancels the subscription. The channel holds the lowest height that
+	// it hasn't delivered yet, and starts with the lowest height the filter
+	// headers were rolled back to before, if they were, as blocks above it
+	// may have been scanned with the wrong filters before the subscription.
+	SubscribeFilterHeaderRollbacks() (<-chan uint32, func())
 }
 
 // rescanOptions holds the set of functional parameters for Rescan.
@@ -487,6 +496,14 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		}
 	}()
 
+	// A repair of the filter headers can roll them back below blocks that
+	// the rescan has already scanned, once it finds that they were wrong,
+	// and so were the filters checked against them. We'll watch for that
+	// and scan those blocks again.
+	filterRollbacks, cancelFilterRollbacks :=
+		chain.SubscribeFilterHeaderRollbacks()
+	defer cancelFilterRollbacks()
+
 	var (
 		blockRetrySignal <-chan time.Time
 		// blockRetryInterval is the interval in which we'll continually
@@ -625,6 +642,61 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// the tip of the chain.
 	current := false
 
+	// rewindTo walks the rescan back to the block at the given height,
+	// notifying each block it leaves as disconnected so that it's scanned
+	// again, as it must be once the filter headers that its filter was
+	// checked against have been rolled back below it. We don't scan blocks
+	// from before our start time, so we'll stop at the first of those,
+	// which also keeps a wallet from being rewound past its birthday. It
+	// returns whether we left any blocks.
+	rewindTo := func(height uint32) (bool, error) {
+		from := curStamp.Height
+		for curStamp.Height > int32(height) &&
+			ro.startTime.Before(curHeader.Timestamp) {
+
+			if ro.ntfn.OnFilteredBlockDisconnected != nil {
+				ro.ntfn.OnFilteredBlockDisconnected(
+					curStamp.Height, &curHeader,
+				)
+			}
+
+			header, err := chain.GetBlockHeaderByHeight(
+				uint32(curStamp.Height - 1),
+			)
+			if err != nil {
+				return true, err
+			}
+			curHeader = *header
+			curStamp.Hash = header.BlockHash()
+			curStamp.Height--
+		}
+
+		if curStamp.Height == from {
+			return false, nil
+		}
+
+		log.Infof("Rescan rewound from block %d to %d, as the filter "+
+			"headers were rolled back to block %d", from,
+			curStamp.Height, height)
+
+		return true, nil
+	}
+
+	// filterHeadersBehind returns whether the filter headers are behind the
+	// block we're at, while it's still in the chain, as they are once
+	// they've been rolled back below it until they're synced again.
+	filterHeadersBehind := func() bool {
+		bestBlock, err := chain.BestBlock()
+		if err != nil || bestBlock.Height >= curStamp.Height {
+			return false
+		}
+
+		header, err := chain.GetBlockHeaderByHeight(
+			uint32(curStamp.Height),
+		)
+		return err == nil && header.BlockHash() == curStamp.Hash
+	}
+
 	// Loop through blocks, one at a time. This relies on the underlying
 	// chain source to deliver notifications in the correct order.
 rescanLoop:
@@ -650,6 +722,27 @@ rescanLoop:
 
 			case <-ro.quit:
 				return ErrRescanExit
+
+			// The filter headers were rolled back, so if that's
+			// below blocks we've scanned, we'll rewind and catch up
+			// with the chain again, scanning those blocks with
+			// filters checked against the filter headers that
+			// replace them. The blocks we were notified of or are
+			// retrying are above where we rewound to, so we're
+			// done with them.
+			case height := <-filterRollbacks:
+				rewound, err := rewindTo(height)
+				if err != nil {
+					return err
+				}
+
+				if rewound {
+					current = false
+					blockSubscription.Cancel()
+					blockSubscription = nil
+					blockRetryQueue.clear()
+					blockRetrySignal = nil
+				}
 
 			// An update mesage has just come across, if it points
 			// to a prior point in the chain, then we may need to
@@ -807,6 +900,17 @@ rescanLoop:
 		// point, we'll be "current" again.
 		case false:
 
+			// If the filter headers were rolled back below blocks
+			// we've scanned, we'll rewind to scan them again.
+			select {
+			case height := <-filterRollbacks:
+				if _, err := rewindTo(height); err != nil {
+					return err
+				}
+
+			default:
+			}
+
 			// Apply all queued filter updates.
 		updateFilterLoop:
 			for {
@@ -836,16 +940,37 @@ rescanLoop:
 			// ourselves as current and follow notifications.
 			nextHeight := curStamp.Height + 1
 			if nextHeight > bestBlock.Height {
+				// We can only follow the chain from a block
+				// the filter headers have reached, so if
+				// they've been rolled back below us, we'll wait
+				// for them to be synced again.
+				if filterHeadersBehind() {
+					err := waitForRetry(
+						chain, ro, &curStamp, &curHeader,
+						blockRetryInterval,
+					)
+					if err != nil {
+						return err
+					}
+
+					continue rescanLoop
+				}
+
 				// Ensure we cancel the old subscription if
 				// we're going back to scan for missed blocks.
 				if blockSubscription != nil {
 					blockSubscription.Cancel()
 				}
 
-				// Subscribe to block notifications.
+				// Subscribe to block notifications. If that
+				// fails as the filter headers were rolled back
+				// below us since we looked, we'll try again.
 				blockSubscription, err = chain.Subscribe(
 					uint32(curStamp.Height),
 				)
+				if err != nil && filterHeadersBehind() {
+					continue rescanLoop
+				}
 				if err != nil {
 					return fmt.Errorf("unable to register "+
 						"block subscription: %v", err)
@@ -914,10 +1039,11 @@ rescanLoop:
 	}
 }
 
-// waitForRetry waits for the given interval before a block is retried while
-// catching up with the chain. Filter updates received in the meantime are
-// applied right away, so that callers of Update aren't blocked by a block we're
-// unable to fetch, in which case the wait is cut short.
+// waitForRetry waits for the given interval before we try again to make
+// progress while catching up with the chain, as when we're unable to fetch a
+// block or the filter headers are behind us. Filter updates received in the
+// meantime are applied right away, so that callers of Update aren't blocked
+// while we wait, in which case the wait is cut short.
 func waitForRetry(chain ChainSource, ro *rescanOptions,
 	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader,
 	interval time.Duration) error {

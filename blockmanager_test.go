@@ -1585,3 +1585,77 @@ func TestRollBackToHeightDisconnectedHeights(t *testing.T) {
 			rollBackTo)
 	}
 }
+
+// TestFilterHeaderRollbackSubscriptions ensures that each subscriber to
+// rollbacks of the filter headers is left with the lowest height it hasn't
+// received yet, that a new subscriber starts with the lowest height the filter
+// headers were rolled back to before, and that a canceled one receives no more.
+func TestFilterHeaderRollbackSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, cleanUp, err := setupBlockManager()
+	if err != nil {
+		t.Fatalf("unable to set up ChainService: %v", err)
+	}
+	defer cleanUp()
+
+	assertRollback := func(rollbacks <-chan uint32, height uint32) {
+		t.Helper()
+
+		select {
+		case got := <-rollbacks:
+			if got != height {
+				t.Fatalf("expected rollback to height %d, "+
+					"got %d", height, got)
+			}
+		default:
+			t.Fatalf("expected rollback to height %d", height)
+		}
+	}
+	assertNoRollback := func(rollbacks <-chan uint32) {
+		t.Helper()
+
+		select {
+		case got := <-rollbacks:
+			t.Fatalf("expected no rollback, got one to height %d",
+				got)
+		default:
+		}
+	}
+
+	// A subscriber from before any rollback starts with none.
+	rollbacks1, cancel1 := bm.subscribeFilterHeaderRollbacks()
+	assertNoRollback(rollbacks1)
+
+	// It receives a rollback, and when it hasn't received several, the
+	// lowest of them, as it must rewind to the lowest.
+	bm.notifyFilterHeaderRollback(100)
+	assertRollback(rollbacks1, 100)
+	bm.notifyFilterHeaderRollback(120)
+	bm.notifyFilterHeaderRollback(90)
+	bm.notifyFilterHeaderRollback(110)
+	assertRollback(rollbacks1, 90)
+	assertNoRollback(rollbacks1)
+
+	// A new subscriber starts with the lowest rollback so far, as it may
+	// have scanned blocks above it with the wrong filters before then.
+	rollbacks2, cancel2 := bm.subscribeFilterHeaderRollbacks()
+	defer cancel2()
+	assertRollback(rollbacks2, 90)
+
+	// A canceled subscriber receives no more rollbacks, while the others
+	// do.
+	cancel1()
+	bm.notifyFilterHeaderRollback(80)
+	assertNoRollback(rollbacks1)
+	assertRollback(rollbacks2, 80)
+
+	// A rollback above the lowest so far is received, but new subscribers
+	// still start with the lowest.
+	bm.notifyFilterHeaderRollback(95)
+	assertRollback(rollbacks2, 95)
+	rollbacks3, cancel3 := bm.subscribeFilterHeaderRollbacks()
+	defer cancel3()
+	assertRollback(rollbacks3, 80)
+	assertNoRollback(rollbacks3)
+}

@@ -1719,3 +1719,15 @@ func (s *RescanChainSource) Subscribe(
 	bestHeight uint32) (*blockntfns.Subscription, error) {
 	return s.blockSubscriptionMgr.NewSubscription(bestHeight)
 }
+
+// SubscribeFilterHeaderRollbacks returns a channel that receives the height the
+// filter headers were rolled back to each time a repair finds that they were
+// wrong above it, along with a function that cancels the subscription. The
+// channel holds the lowest height that it hasn't delivered yet, and starts with
+// the lowest height the filter headers were rolled back to before, if they
+// were.
+func (s *RescanChainSource) SubscribeFilterHeaderRollbacks() (<-chan uint32,
+	func()) {
+
+	return s.blockManager.subscribeFilterHeaderRollbacks()
+}

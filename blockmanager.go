@@ -230,6 +230,23 @@ type blockManager struct {
 	// for the tip of the chain will be sent upon.
 	blockNtfnChan chan blockntfns.BlockNtfn
 
+	// filterRollbackMtx guards the fields below, which keep track of the
+	// subscriptions to rollbacks of the filter headers.
+	filterRollbackMtx sync.Mutex
+
+	// filterRollbackSubs holds the channel of each subscription to
+	// rollbacks of the filter headers, by the subscription's ID.
+	filterRollbackSubs map[uint64]chan uint32
+
+	// nextFilterRollbackSub is the ID of the next subscription to
+	// rollbacks of the filter headers.
+	nextFilterRollbackSub uint64
+
+	// lowestFilterRollback is the lowest height the filter headers have
+	// been rolled back to, if filterHeadersRolledBack says they have been.
+	lowestFilterRollback    uint32
+	filterHeadersRolledBack bool
+
 	wg   sync.WaitGroup
 	quit chan struct{}
 
@@ -278,6 +295,7 @@ func newBlockManager(s *ChainService,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
 		requestedTxns:       make(map[chainhash.Hash]*txRequest),
 		firstPeerSignal:     firstPeerSignal,
+		filterRollbackSubs:  make(map[uint64]chan uint32),
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait
@@ -3255,6 +3273,64 @@ func (b *blockManager) onBlockDisconnected(headerDisconnected wire.BlockHeader,
 // notifications for the tip of the chain can be received.
 func (b *blockManager) Notifications() <-chan blockntfns.BlockNtfn {
 	return b.blockNtfnChan
+}
+
+// subscribeFilterHeaderRollbacks returns a channel that receives the height the
+// filter headers were rolled back to each time they are, along with a function
+// that cancels the subscription. The channel holds the lowest height that it
+// hasn't delivered yet, and starts with the lowest height the filter headers
+// were rolled back to before, if they were, as the subscriber may have scanned
+// blocks above it with the wrong filters before it subscribed.
+func (b *blockManager) subscribeFilterHeaderRollbacks() (<-chan uint32,
+	func()) {
+
+	b.filterRollbackMtx.Lock()
+	defer b.filterRollbackMtx.Unlock()
+
+	rollbacks := make(chan uint32, 1)
+	if b.filterHeadersRolledBack {
+		rollbacks <- b.lowestFilterRollback
+	}
+
+	id := b.nextFilterRollbackSub
+	b.nextFilterRollbackSub++
+	b.filterRollbackSubs[id] = rollbacks
+
+	cancel := func() {
+		b.filterRollbackMtx.Lock()
+		delete(b.filterRollbackSubs, id)
+		b.filterRollbackMtx.Unlock()
+	}
+
+	return rollbacks, cancel
+}
+
+// notifyFilterHeaderRollback notifies the subscribers to rollbacks of the
+// filter headers that they were rolled back to the given height. A subscriber
+// that hasn't received an earlier height yet is left with the lower of the two.
+func (b *blockManager) notifyFilterHeaderRollback(height uint32) {
+	b.filterRollbackMtx.Lock()
+	defer b.filterRollbackMtx.Unlock()
+
+	if !b.filterHeadersRolledBack || height < b.lowestFilterRollback {
+		b.lowestFilterRollback = height
+		b.filterHeadersRolledBack = true
+	}
+
+	// We hold the lock that every send on these channels is made under,
+	// and their subscribers only receive, so once we've taken a height
+	// that's waiting, there's room for the one we send.
+	for _, rollbacks := range b.filterRollbackSubs {
+		lowest := height
+		select {
+		case pending := <-rollbacks:
+			lowest = min(lowest, pending)
+
+		default:
+		}
+
+		rollbacks <- lowest
+	}
 }
 
 // NotificationsSinceHeight returns a backlog of block notifications starting

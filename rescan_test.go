@@ -2,6 +2,7 @@ package neutrino
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"runtime/pprof"
@@ -32,6 +33,10 @@ type mockChainSource struct {
 	filtersQueried chan chainhash.Hash
 	blocksQueried  chan chainhash.Hash
 
+	// filterHeaderRollbacks delivers rollbacks of the filter headers to
+	// the rescan.
+	filterHeaderRollbacks chan uint32
+
 	mu                    sync.Mutex // all fields below are protected
 	bestBlock             waddrmgr.BlockStamp
 	blockHeightIndex      map[chainhash.Hash]uint32
@@ -43,6 +48,14 @@ type mockChainSource struct {
 	filters               map[chainhash.Hash]*gcs.Filter
 	filterHeadersByHeight map[uint32]*chainhash.Hash
 	subscribeOverride     func(uint32) (*blockntfns.Subscription, error)
+
+	// filterHeadersTip is the height of the filter headers' tip while
+	// they've been rolled back below the best block, and nil otherwise.
+	filterHeadersTip *int32
+
+	// subscriptions, if set, receives the height of each attempt to
+	// subscribe to block notifications.
+	subscriptions chan uint32
 }
 
 var _ ChainSource = (*mockChainSource)(nil)
@@ -50,9 +63,10 @@ var _ ChainSource = (*mockChainSource)(nil)
 // newMockChainSource creates a new mock chain backed by numBlocks.
 func newMockChainSource(numBlocks int) *mockChainSource {
 	chain := &mockChainSource{
-		ntfnChan:       make(chan blockntfns.BlockNtfn),
-		filtersQueried: make(chan chainhash.Hash),
-		blocksQueried:  make(chan chainhash.Hash),
+		ntfnChan:              make(chan blockntfns.BlockNtfn),
+		filtersQueried:        make(chan chainhash.Hash),
+		blocksQueried:         make(chan chainhash.Hash),
+		filterHeaderRollbacks: make(chan uint32, 1),
 
 		blockHeightIndex:      make(map[chainhash.Hash]uint32),
 		blockHashesByHeight:   make(map[uint32]*chainhash.Hash),
@@ -238,12 +252,104 @@ func (c *mockChainSource) BestBlock() (*waddrmgr.BlockStamp, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.filterHeadersTip != nil {
+		stamp := c.blockStampLocked(*c.filterHeadersTip)
+		return &stamp, nil
+	}
+
 	// Return a copy to prevent mutating internal state.
 	return &waddrmgr.BlockStamp{
 		Height:    c.bestBlock.Height,
 		Hash:      c.bestBlock.Hash,
 		Timestamp: c.bestBlock.Timestamp,
 	}, nil
+}
+
+// blockStamp returns the stamp of the block at the given height.
+func (c *mockChainSource) blockStamp(height int32) waddrmgr.BlockStamp {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.blockStampLocked(height)
+}
+
+// blockStampLocked returns the stamp of the block at the given height.
+//
+// NOTE: The mutex must be held.
+func (c *mockChainSource) blockStampLocked(height int32) waddrmgr.BlockStamp {
+	hash := c.blockHashesByHeight[uint32(height)]
+	return waddrmgr.BlockStamp{
+		Height:    height,
+		Hash:      *hash,
+		Timestamp: c.blockHeaders[*hash].Timestamp,
+	}
+}
+
+// setFilterMatching replaces the filter of the block with the given hash with
+// one that matches the given script, as the filters checked against filter
+// headers that were wrong are replaced once those are rolled back.
+func (c *mockChainSource) setFilterMatching(hash chainhash.Hash,
+	script []byte) {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.filters[hash], _ = builder.WithKeyHash(&hash).AddEntry(script).Build()
+}
+
+// rollBackFilterHeaders rolls the filter headers back to the given height,
+// leaving the blocks above it in the chain, as a repair does once it finds that
+// they were wrong above it. The notify boolean can be used to notify the
+// rollback.
+func (c *mockChainSource) rollBackFilterHeaders(height int32, notify bool) {
+	c.mu.Lock()
+	c.filterHeadersTip = &height
+	c.mu.Unlock()
+
+	if notify {
+		c.filterHeaderRollbacks <- uint32(height)
+	}
+}
+
+// syncFilterHeader advances the filter headers' tip by a block after they were
+// rolled back, as they're synced again. The notify boolean can be used to
+// notify the block.
+func (c *mockChainSource) syncFilterHeader(notify bool) waddrmgr.BlockStamp {
+	c.mu.Lock()
+	height := *c.filterHeadersTip + 1
+	if height < c.bestBlock.Height {
+		c.filterHeadersTip = &height
+	} else {
+		c.filterHeadersTip = nil
+	}
+	block := c.blockStampLocked(height)
+	header := *c.blockHeaders[block.Hash]
+	c.mu.Unlock()
+
+	if notify {
+		c.ntfnChan <- blockntfns.NewBlockConnected(header, uint32(height))
+	}
+
+	return block
+}
+
+// SubscribeFilterHeaderRollbacks returns a channel that receives the height the
+// filter headers were rolled back to each time they are, along with a function
+// that cancels the subscription.
+func (c *mockChainSource) SubscribeFilterHeaderRollbacks() (<-chan uint32,
+	func()) {
+
+	return c.filterHeaderRollbacks, func() {}
+}
+
+// watchSubscriptions returns a channel that receives the height of each attempt
+// to subscribe to block notifications from now on.
+func (c *mockChainSource) watchSubscriptions() <-chan uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.subscriptions = make(chan uint32, 10)
+	return c.subscriptions
 }
 
 // GetBlockHeaderByHeight returns the header of the block with the given height.
@@ -313,7 +419,9 @@ func (c *mockChainSource) GetFilterHeaderByHeight(
 	defer c.mu.Unlock()
 
 	filterHeader, ok := c.filterHeadersByHeight[height]
-	if !ok {
+	if !ok || (c.filterHeadersTip != nil &&
+		height > uint32(*c.filterHeadersTip)) {
+
 		return nil, errors.New("filter header not found")
 	}
 	return filterHeader, nil
@@ -376,11 +484,26 @@ func (c *mockChainSource) Subscribe(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.subscriptions != nil {
+		c.subscriptions <- bestHeight
+	}
+
+	// Like the subscription manager, we'll refuse to deliver notifications
+	// from above the filter headers' tip.
+	tip := c.bestBlock.Height
+	if c.filterHeadersTip != nil {
+		tip = *c.filterHeadersTip
+	}
+	if bestHeight > uint32(tip) {
+		return nil, fmt.Errorf("request with height %d is greater "+
+			"than best height known %d", bestHeight, tip)
+	}
+
 	if c.subscribeOverride != nil {
 		return c.subscribeOverride(bestHeight)
 	}
 
-	for i := bestHeight + 1; i <= uint32(c.bestBlock.Height); i++ {
+	for i := bestHeight + 1; i <= uint32(tip); i++ {
 		hash := c.blockHashesByHeight[i]
 		header := c.blockHeaders[*hash]
 		c.ntfnChan <- blockntfns.NewBlockConnected(*header, i)
@@ -527,6 +650,96 @@ func (ctx *rescanTestContext) recvBlockConnected(block waddrmgr.BlockStamp) {
 	case <-time.After(time.Second):
 		ctx.t.Fatalf("expected to receive block connected "+
 			"notification for %v", spew.Sdump(block))
+	}
+}
+
+// recvBlockDisconnected is a helper method used to expect a block disconnected
+// notification being delivered.
+func (ctx *rescanTestContext) recvBlockDisconnected(block waddrmgr.BlockStamp) {
+	ctx.t.Helper()
+
+	ctx.recvBlockDisconnectedWhileRetrying(block, nil)
+}
+
+// recvBlockDisconnectedWhileRetrying expects a block disconnected notification
+// for the given block, servicing any filter or block queries the rescan issues
+// for the block it's retrying, if one is given, in the meantime.
+func (ctx *rescanTestContext) recvBlockDisconnectedWhileRetrying(
+	block waddrmgr.BlockStamp, retrying *chainhash.Hash) {
+
+	ctx.t.Helper()
+
+	// A nil channel is never ready, so we won't service queries if we
+	// aren't retrying a block.
+	var filtersQueried, blocksQueried chan chainhash.Hash
+	if retrying != nil {
+		filtersQueried = ctx.chain.filtersQueried
+		blocksQueried = ctx.chain.blocksQueried
+	}
+
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case recvBlock := <-ctx.blocksDisconnected:
+			if !reflect.DeepEqual(recvBlock, block) {
+				ctx.t.Fatalf("expected block disconnected "+
+					"notification for %v, got %v",
+					spew.Sdump(block),
+					spew.Sdump(recvBlock))
+			}
+			return
+
+		case hashQueried := <-filtersQueried:
+			if !hashQueried.IsEqual(retrying) {
+				ctx.t.Fatalf("expected to query filter %v, "+
+					"got %v", retrying, hashQueried)
+			}
+
+		case hashQueried := <-blocksQueried:
+			if !hashQueried.IsEqual(retrying) {
+				ctx.t.Fatalf("expected to query block %v, "+
+					"got %v", retrying, hashQueried)
+			}
+
+		case <-timeout:
+			ctx.t.Fatalf("expected to receive block disconnected "+
+				"notification for %v", spew.Sdump(block))
+		}
+	}
+}
+
+// assertSubscribed asserts that the next attempt to subscribe to block
+// notifications, as reported by the channel watchSubscriptions returned, was
+// from the given height.
+func (ctx *rescanTestContext) assertSubscribed(subscriptions <-chan uint32,
+	height int32) {
+
+	ctx.t.Helper()
+
+	select {
+	case subscribed := <-subscriptions:
+		if subscribed != uint32(height) {
+			ctx.t.Fatalf("expected to subscribe from height %d, "+
+				"got %d", height, subscribed)
+		}
+	case <-time.After(time.Second):
+		ctx.t.Fatalf("expected to subscribe from height %d", height)
+	}
+}
+
+// assertNotSubscribed asserts that there's no attempt to subscribe to block
+// notifications, as reported by the channel watchSubscriptions returned, for a
+// while.
+func (ctx *rescanTestContext) assertNotSubscribed(
+	subscriptions <-chan uint32) {
+
+	ctx.t.Helper()
+
+	select {
+	case subscribed := <-subscriptions:
+		ctx.t.Fatalf("expected no attempt to subscribe, got one from "+
+			"height %d", subscribed)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -1076,6 +1289,319 @@ func TestRescanRetryFilterFetchWhileCatchingUp(t *testing.T) {
 	if err := ctx.rescan.Update(AddInputs(InputWithScript{})); err != nil {
 		t.Fatalf("unable to update rescan: %v", err)
 	}
+}
+
+// newRollbackTestContext creates a test harness for a rescan watching
+// testWatchScript from the tip of a chain of 10 blocks, with the given start
+// time, and starts it once it's current with the chain.
+func newRollbackTestContext(t *testing.T,
+	startTime time.Time) *rescanTestContext {
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(startTime),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+	ctx.start(true)
+
+	return ctx
+}
+
+// scanNewBlock adds a block to the chain and expects the rescan to scan it.
+func (ctx *rescanTestContext) scanNewBlock() waddrmgr.BlockStamp {
+	ctx.t.Helper()
+
+	block := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.recvBlockConnected(block)
+
+	return block
+}
+
+// TestRescanFilterHeaderRollbackWhenCurrent ensures that a rescan that's current
+// with the chain rewinds when the filter headers are rolled back below blocks
+// it has scanned, and scans those blocks again as the filter headers are synced
+// again, with the filters checked against them.
+func TestRescanFilterHeaderRollbackWhenCurrent(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRollbackTestContext(t, time.Time{})
+	defer ctx.stop()
+
+	// The rescan scans three new blocks. The second pays us, although the
+	// filter it's served doesn't match, as when it was checked against
+	// filter headers that were wrong.
+	block1 := ctx.scanNewBlock()
+	block2 := ctx.scanNewBlock()
+	block3 := ctx.scanNewBlock()
+
+	// A repair then finds the filter headers wrong above the first block
+	// and rolls them back to it. The second block's filter, checked against
+	// the filter headers that replace them, matches.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.setFilterMatching(block2.Hash, testWatchScript)
+	ctx.chain.rollBackFilterHeaders(block1.Height, true)
+
+	// The rescan should rewind to the first block, notifying the blocks
+	// above it as disconnected, and follow the chain from there.
+	ctx.recvBlockDisconnected(block3)
+	ctx.recvBlockDisconnected(block2)
+	ctx.assertSubscribed(subscriptions, block1.Height)
+
+	// As the filter headers are synced again, the rescan should scan the
+	// blocks again, fetching the second as its filter now matches.
+	ctx.chain.syncFilterHeader(true)
+	ctx.assertFilterQueried(block2.Hash)
+	ctx.assertBlockQueried(block2.Hash)
+	ctx.recvBlockConnected(block2)
+	ctx.chain.syncFilterHeader(true)
+	ctx.assertFilterQueried(block3.Hash)
+	ctx.recvBlockConnected(block3)
+
+	// Subsequent blocks should be processed as usual.
+	ctx.scanNewBlock()
+}
+
+// TestRescanFilterHeaderRollbackAboveScannedBlocks ensures that a rescan
+// ignores a rollback of the filter headers to the block it's at or above it, as
+// it hasn't scanned any blocks above it.
+func TestRescanFilterHeaderRollbackAboveScannedBlocks(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRollbackTestContext(t, time.Time{})
+	defer ctx.stop()
+
+	block := ctx.scanNewBlock()
+
+	// The rescan should neither notify any blocks as disconnected, which
+	// would block it, nor stop following the chain.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.filterHeaderRollbacks <- uint32(block.Height)
+	ctx.chain.filterHeaderRollbacks <- uint32(block.Height + 1)
+
+	ctx.scanNewBlock()
+	ctx.assertNotSubscribed(subscriptions)
+}
+
+// TestRescanFilterHeaderRollbackWhileCatchingUp ensures that a rescan that's
+// catching up with the chain rewinds when the filter headers are rolled back
+// below blocks it has scanned, even while it's retrying a block whose filter it
+// can't fetch, as it can't when the filters peers serve don't match filter
+// headers that are wrong.
+func TestRescanFilterHeaderRollbackWhileCatchingUp(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRollbackTestContext(t, time.Time{})
+	defer ctx.stop()
+
+	block1 := ctx.scanNewBlock()
+	block2 := ctx.scanNewBlock()
+
+	// We'll add a block without notifying it and instead notify an invalid
+	// block, which should prompt the rescan to catch up with the chain
+	// manually, retrying the new block as its filter can't be fetched.
+	ctx.chain.setFailGetFilter(true)
+	block3 := ctx.chain.addNewBlock(false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+	ctx.assertFilterQueried(block3.Hash)
+	ctx.assertFilterQueried(block3.Hash)
+
+	// A repair then finds the filter headers wrong above the first block,
+	// rolls them back to it, and they're synced again. The second block's
+	// filter, checked against the filter headers that replace them,
+	// matches.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.setFilterMatching(block2.Hash, testWatchScript)
+	ctx.chain.filterHeaderRollbacks <- uint32(block1.Height)
+
+	// The rescan should rewind to the first block, notifying the second as
+	// disconnected, and scan the blocks above it again once their filters
+	// can be fetched, fetching the second as its filter now matches.
+	ctx.recvBlockDisconnectedWhileRetrying(block2, &block3.Hash)
+	ctx.chain.setFailGetFilter(false)
+	ctx.recvBlockConnectedAfterRetries(block2)
+	ctx.assertFilterQueried(block3.Hash)
+	ctx.recvBlockConnected(block3)
+
+	// Once it follows the chain again, subsequent blocks should be
+	// processed as usual.
+	ctx.assertSubscribed(subscriptions, block3.Height)
+	ctx.scanNewBlock()
+}
+
+// TestRescanFilterHeaderRollbackBeforeStart ensures that a rescan rewinds below
+// the block it starts from when the filter headers were rolled back below it
+// before it started, as the caller may have scanned the blocks above it with
+// the wrong filters by then.
+func TestRescanFilterHeaderRollbackBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+
+	// The filter headers were rolled back to height 5 before the rescan
+	// started from height 9, so it should rewind to height 5, notifying
+	// the blocks above it as disconnected, and scan them again.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.filterHeaderRollbacks <- 5
+	ctx.start(false)
+	defer ctx.stop()
+
+	for height := int32(9); height > 5; height-- {
+		ctx.recvBlockDisconnected(ctx.chain.blockStamp(height))
+	}
+	for height := int32(6); height <= 9; height++ {
+		block := ctx.chain.blockStamp(height)
+		ctx.assertFilterQueried(block.Hash)
+		ctx.recvBlockConnected(block)
+	}
+
+	// Once it follows the chain, subsequent blocks should be processed as
+	// usual.
+	ctx.assertSubscribed(subscriptions, 9)
+	ctx.scanNewBlock()
+}
+
+// TestRescanFilterHeaderRollbackStopsAtStartTime ensures that a rescan doesn't
+// rewind past the blocks from before its start time, which it doesn't scan,
+// when the filter headers are rolled back below them, and that it waits for
+// the filter headers to be synced up to the block it's at before it follows the
+// chain from there.
+func TestRescanFilterHeaderRollbackStopsAtStartTime(t *testing.T) {
+	t.Parallel()
+
+	// The rescan starts from height 9, and scans the blocks after the one
+	// at height 11, as each is mined 10 minutes after the last.
+	genesis := chaincfg.MainNetParams.GenesisBlock.Header.Timestamp
+	ctx := newRollbackTestContext(t, genesis.Add(11*10*time.Minute))
+	defer ctx.stop()
+
+	block10 := ctx.chain.addNewBlock(true)
+	ctx.recvBlockConnected(block10)
+	block11 := ctx.chain.addNewBlock(true)
+	ctx.recvBlockConnected(block11)
+	block12 := ctx.scanNewBlock()
+	block13 := ctx.scanNewBlock()
+
+	// A repair then finds the filter headers wrong above height 9 and rolls
+	// them back to it. The filter of the block at height 12, checked
+	// against the filter headers that replace them, matches.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.setFilterMatching(block12.Hash, testWatchScript)
+	ctx.chain.rollBackFilterHeaders(9, true)
+
+	// The rescan should only rewind to height 11, notifying the blocks it
+	// scanned as disconnected, and wait there for the filter headers.
+	ctx.recvBlockDisconnected(block13)
+	ctx.recvBlockDisconnected(block12)
+	ctx.assertNotSubscribed(subscriptions)
+	ctx.assertRunning()
+
+	// Once the filter headers reach height 11, the rescan should follow the
+	// chain from there, scanning the blocks above it again, and fetch the
+	// one at height 12 as its filter now matches.
+	ctx.chain.syncFilterHeader(false)
+	ctx.chain.syncFilterHeader(false)
+	ctx.assertSubscribed(subscriptions, block11.Height)
+	ctx.chain.syncFilterHeader(true)
+	ctx.assertFilterQueried(block12.Hash)
+	ctx.assertBlockQueried(block12.Hash)
+	ctx.recvBlockConnected(block12)
+	ctx.chain.syncFilterHeader(true)
+	ctx.assertFilterQueried(block13.Hash)
+	ctx.recvBlockConnected(block13)
+}
+
+// TestRescanWaitsForFilterHeadersRolledBack ensures that a rescan catching up
+// with the chain waits for the filter headers when they were rolled back below
+// the block it's at before it's notified of that, rather than trying to follow
+// the chain from above their tip, which ended it.
+func TestRescanWaitsForFilterHeadersRolledBack(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRollbackTestContext(t, time.Time{})
+	defer ctx.stop()
+
+	block1 := ctx.scanNewBlock()
+	block2 := ctx.scanNewBlock()
+
+	// The filter headers are rolled back to the first block, and an invalid
+	// block prompts the rescan to catch up with the chain manually before
+	// it's notified of the rollback.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.rollBackFilterHeaders(block1.Height, false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+	ctx.assertNotSubscribed(subscriptions)
+	ctx.assertRunning()
+
+	// Once it's notified of the rollback, it should rewind to the first
+	// block and follow the chain from there.
+	ctx.chain.filterHeaderRollbacks <- uint32(block1.Height)
+	ctx.recvBlockDisconnected(block2)
+	ctx.assertSubscribed(subscriptions, block1.Height)
+
+	ctx.chain.syncFilterHeader(true)
+	ctx.assertFilterQueried(block2.Hash)
+	ctx.recvBlockConnected(block2)
+}
+
+// TestRescanResubscribesAfterFilterHeaderRollback ensures that a rescan that
+// fails to subscribe to block notifications, as the filter headers were rolled
+// back below the block it's at just then, tries again once it has rewound
+// rather than ending.
+func TestRescanResubscribesAfterFilterHeaderRollback(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRollbackTestContext(t, time.Time{})
+	defer ctx.stop()
+
+	block1 := ctx.scanNewBlock()
+	block2 := ctx.scanNewBlock()
+
+	// An invalid block prompts the rescan to catch up with the chain
+	// manually, and the filter headers are rolled back to the first block
+	// just as it subscribes to block notifications again, before it's
+	// notified of the rollback.
+	subscriptions := ctx.chain.watchSubscriptions()
+	var rolledBack bool
+	ctx.chain.overrideSubscribe(func(uint32) (*blockntfns.Subscription,
+		error) {
+
+		// The mock chain's mutex is held while this runs.
+		if !rolledBack {
+			rolledBack = true
+			height := block1.Height
+			ctx.chain.filterHeadersTip = &height
+
+			return nil, errors.New("filter headers rolled back")
+		}
+
+		return &blockntfns.Subscription{
+			Notifications: ctx.chain.ntfnChan,
+			Cancel:        func() {},
+		}, nil
+	})
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+	ctx.assertSubscribed(subscriptions, block2.Height)
+	ctx.assertNotSubscribed(subscriptions)
+	ctx.assertRunning()
+
+	// Once it's notified of the rollback, it should rewind to the first
+	// block and follow the chain from there.
+	ctx.chain.filterHeaderRollbacks <- uint32(block1.Height)
+	ctx.recvBlockDisconnected(block2)
+	ctx.assertSubscribed(subscriptions, block1.Height)
+
+	ctx.chain.syncFilterHeader(true)
+	ctx.assertFilterQueried(block2.Hash)
+	ctx.recvBlockConnected(block2)
 }
 
 // TestWaitForRetryShutdown ensures a retry wait does not delay shutdown.
