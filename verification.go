@@ -22,7 +22,8 @@ var ErrBlockFilterMismatch = errors.New("block doesn't match its filter " +
 // block matches the filter header synced for it. The regular filter holds the
 // outpoints a block spends and its output scripts, so it is built from the
 // block alone. On a mismatch, the peers serving a different filter for the
-// block are banned and ErrBlockFilterMismatch is returned.
+// block are banned, a repair of the filter headers is requested, and
+// ErrBlockFilterMismatch is returned.
 func (s *ChainService) verifyBlockFilter(block *bchutil.Block,
 	height uint32) error {
 
@@ -67,6 +68,10 @@ func (s *ChainService) verifyBlockFilter(block *bchutil.Block,
 
 	mismatch := fmt.Errorf("%w: block %v at height %d",
 		ErrBlockFilterMismatch, block.Hash(), height)
+
+	// The filter headers we synced may be wrong from this block or one
+	// before it, which a repair finds out and fixes.
+	s.blockManager.requestFilterHeaderRepair()
 
 	// Ask every peer for the block's filter. Peers are only banned when
 	// another peer serves the built filter, so a block whose filter

@@ -334,6 +334,15 @@ func TestGetBlockVerifiesFilter(t *testing.T) {
 					t.Fatal("peer banned")
 				}
 			}
+			// A mismatch asks for a repair of the filter headers.
+			bm.newHeadersMtx.Lock()
+			requested := bm.filterRepairRequested
+			bm.newHeadersMtx.Unlock()
+			if requested != test.wantErr {
+				t.Fatalf("expected a repair of the filter headers "+
+					"requested %v, got %v", test.wantErr,
+					requested)
+			}
 			if cs.IsBanned(goodPeer) {
 				t.Fatal("peer serving the correct filter banned")
 			}

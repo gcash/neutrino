@@ -24,6 +24,8 @@ import (
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
+	"github.com/gcash/neutrino/cache"
+	"github.com/gcash/neutrino/filterdb"
 	"github.com/gcash/neutrino/headerfs"
 	"github.com/gcash/neutrino/headerlist"
 )
@@ -44,6 +46,16 @@ const (
 	// retryTimeout is the time we'll wait between failed queries to fetch
 	// filter checkpoints and headers.
 	retryTimeout = 3 * time.Second
+
+	// filterRepairBackoff is how long we'll wait after a repair of the
+	// filter headers that couldn't settle whether they're right before we
+	// take another request for one.
+	filterRepairBackoff = time.Minute
+
+	// filterRollbackBatchSize is the number of filters we'll drop from the
+	// filter database in each transaction when rolling back the filter
+	// headers.
+	filterRollbackBatchSize = 2000
 
 	// maxCFCheckptsPerQuery is the maximum number of filter header
 	// checkpoints we can query for within a single message over the wire.
@@ -177,6 +189,15 @@ type blockManager struct {
 	// a new tip, but not necessarily each block that was connected during
 	// switch over.
 	newHeadersSignal *sync.Cond
+
+	// filterRepairRequested is set when the filter headers we synced were
+	// found to disagree with a block or with our peers, for cfHandler to
+	// repair them, and filterRepairBackoffUntil is when we'll take a
+	// request again after a repair that couldn't settle it. Callers MUST
+	// hold newHeadersMtx, which cfHandler waits on, each time they
+	// read/write from these fields.
+	filterRepairRequested    bool
+	filterRepairBackoffUntil time.Time
 
 	// filterHeaderTip will be set to the height of the current filter
 	// header tip at all times.  Callers MUST hold the lock below each time
@@ -571,7 +592,9 @@ waitForHeaders:
 
 	b.newHeadersSignal.L.Lock()
 	b.newFilterHeadersMtx.RLock()
-	for b.filterHeaderTip+wire.CFCheckptInterval > b.headerTip && !b.BlockHeadersSynced() {
+	for b.filterHeaderTip+wire.CFCheckptInterval > b.headerTip &&
+		!b.BlockHeadersSynced() && !b.filterRepairRequested {
+
 		b.newFilterHeadersMtx.RUnlock()
 		b.newHeadersSignal.Wait()
 
@@ -591,6 +614,13 @@ waitForHeaders:
 	}
 	b.newFilterHeadersMtx.RUnlock()
 	b.newHeadersSignal.L.Unlock()
+
+	// If we were asked to repair the filter headers, we'll do that first
+	// and start over, as they may have been rolled back.
+	if b.repairFilterHeadersIfRequested() {
+		allCFCheckpoints = nil
+		goto waitForHeaders
+	}
 
 	// Now that the block headers are finished or ahead of the filter
 	// headers, we'll grab the current chain tip so we can base our filter
@@ -625,6 +655,14 @@ waitForHeaders:
 		case <-b.quit:
 			return
 		default:
+		}
+
+		// If resolveConflict found that we disagree with our peers, it
+		// asked for a repair of the filter headers, which we'll do
+		// before we start over.
+		if b.repairFilterHeadersIfRequested() {
+			allCFCheckpoints = nil
+			goto waitForHeaders
 		}
 
 		// If the height now exceeds the height at which we fetched the
@@ -737,10 +775,12 @@ waitForHeaders:
 	// new set of filter new set of filter headers
 	for {
 		// We'll wait until the filter header tip and the header tip
-		// are mismatched.
+		// are mismatched, or we're asked to repair the filter headers.
 		b.newHeadersSignal.L.Lock()
 		b.newFilterHeadersMtx.RLock()
-		for b.filterHeaderTipHash == b.headerTipHash {
+		for b.filterHeaderTipHash == b.headerTipHash &&
+			!b.filterRepairRequested {
+
 			// We'll wait here until we're woken up by the
 			// broadcast signal.
 			b.newFilterHeadersMtx.RUnlock()
@@ -761,6 +801,14 @@ waitForHeaders:
 		}
 		b.newFilterHeadersMtx.RUnlock()
 		b.newHeadersSignal.L.Unlock()
+
+		// If we were asked to repair the filter headers, we'll do that
+		// first and start over, as they may have been rolled back far
+		// enough to sync them from checkpoints again.
+		if b.repairFilterHeadersIfRequested() {
+			allCFCheckpoints = nil
+			goto waitForHeaders
+		}
 
 		// At this point, we know that there're a set of new filter
 		// headers to fetch, so we'll grab them now.
@@ -825,17 +873,15 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	startHeight := filtHeight + 1
 	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
 
-	// Ban any peer that responds with the wrong prev filter header.
+	// A peer whose filter headers don't follow ours disagrees with us
+	// about an earlier one, so either the peer or the filter headers we
+	// synced are wrong. We'll leave its headers out and have a repair
+	// settle which, rather than ban it, as it may be right.
 	for peer, msg := range headers {
 		if msg.PrevFilterHeader != *filterTip {
-			err := b.server.BanPeer(peer, banman.InvalidFilterHeader)
-			if err != nil {
-				log.Errorf("Unable to ban peer %v: %v", peer, err)
-			}
-			sp := b.server.PeerByAddr(peer)
-			if sp != nil {
-				sp.Disconnect()
-			}
+			log.Warnf("Filter headers from peer %v don't follow ours "+
+				"at height %d", peer, filtHeight)
+			b.requestFilterHeaderRepair()
 			delete(headers, peer)
 		}
 	}
@@ -1574,7 +1620,11 @@ func (b *blockManager) resolveConflict(
 	}
 
 	// Otherwise, return an error and allow the loop which calls this
-	// function to call it again with the new set of peers.
+	// function to call it again with the new set of peers. The
+	// checkpoints may disagree with the filter headers we synced, which
+	// trying again doesn't change, so we'll ask for a repair of the filter
+	// headers to settle which are right.
+	b.requestFilterHeaderRepair()
 	return nil, fmt.Errorf("got mismatched checkpoints")
 }
 
@@ -1654,8 +1704,13 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	}
 
 	// If all peers responded with consistent filters and hashes, get the
-	// block and use it to detect who is serving bad filters.
-	block, err := b.server.GetBlock(header.BlockHash())
+	// block and use it to detect who is serving bad filters. We won't check
+	// the block against the filter header we synced for it, as that may be
+	// the one that's wrong.
+	blockHash := header.BlockHash()
+	block, err := b.server.fetchBlock(
+		wire.NewInvVect(wire.InvTypeBlock, &blockHash), targetHeight,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1738,6 +1793,238 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	return invalidPeers, nil
 }
 
+// requestFilterHeaderRepair asks cfHandler to repair the filter headers we
+// synced, as they were found to disagree with a block or with our peers.
+// Requests made while we back off after a repair that couldn't settle it are
+// dropped, as the checks that make them are made again.
+func (b *blockManager) requestFilterHeaderRepair() {
+	b.newHeadersMtx.Lock()
+	defer b.newHeadersMtx.Unlock()
+
+	if time.Now().Before(b.filterRepairBackoffUntil) {
+		log.Debugf("Not repairing the filter headers again before %v",
+			b.filterRepairBackoffUntil)
+		return
+	}
+
+	b.filterRepairRequested = true
+	b.newHeadersSignal.Broadcast()
+}
+
+// repairFilterHeadersIfRequested repairs the filter headers if that was
+// requested, and returns whether it was. If the repair can't settle whether
+// the filter headers are right, we'll back off before taking another request.
+func (b *blockManager) repairFilterHeadersIfRequested() bool {
+	b.newHeadersMtx.Lock()
+	requested := b.filterRepairRequested
+	b.filterRepairRequested = false
+	b.newHeadersMtx.Unlock()
+
+	if !requested {
+		return false
+	}
+
+	log.Infof("Checking our filter headers against our peers'")
+
+	if err := b.repairFilterHeaders(); err != nil {
+		log.Warnf("Unable to repair the filter headers, not trying "+
+			"again for %v: %v", filterRepairBackoff, err)
+
+		b.newHeadersMtx.Lock()
+		b.filterRepairBackoffUntil = time.Now().Add(filterRepairBackoff)
+		b.newHeadersMtx.Unlock()
+	}
+
+	return true
+}
+
+// repairFilterHeaders checks the filter headers we synced against our peers',
+// as they were found to disagree with a block or with our peers, and repairs
+// them. It finds the first block whose filter header differs between us and
+// any peer, and builds the block's filter to settle who's right. If we are,
+// the peers that differ are banned. If a peer is, the peers that differ from
+// it are banned too, and our filter headers are rolled back to the block
+// before, to be synced again. It returns an error if it can't settle it.
+func (b *blockManager) repairFilterHeaders() error {
+	fType := wire.GCSFilterRegular
+	store := b.server.RegFilterHeaders
+
+	_, storeTip, err := store.ChainTip()
+	if err != nil {
+		return err
+	}
+
+	// Each filter header commits to the ones before it, so once a peer's
+	// differs from ours, every later one does too. We'll find the first
+	// checkpoint where a peer's filter header differs from ours, if any,
+	// so that we only fetch the filter headers that follow the one before.
+	numCheckpoints := storeTip / wire.CFCheckptInterval
+	differing := numCheckpoints
+	if numCheckpoints > 0 {
+		tipHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(
+			storeTip,
+		)
+		if err != nil {
+			return err
+		}
+		tipHash := tipHeader.BlockHash()
+
+		ours := make([]chainhash.Hash, numCheckpoints)
+		for i := range ours {
+			height := uint32(i+1) * wire.CFCheckptInterval
+			header, err := store.FetchHeaderByHeight(height)
+			if err != nil {
+				return err
+			}
+			ours[i] = *header
+		}
+
+		for _, checkpoints := range b.getCheckpts(&tipHash, fType) {
+			if uint32(len(checkpoints)) != numCheckpoints {
+				continue
+			}
+			for i := uint32(0); i < differing; i++ {
+				if *checkpoints[i] != ours[i] {
+					differing = i
+					break
+				}
+			}
+		}
+	}
+
+	start := differing*wire.CFCheckptInterval + 1
+	if start > storeTip {
+		return fmt.Errorf("no peer's filter checkpoints differ from "+
+			"ours up to height %d", storeTip)
+	}
+
+	// We'll fetch the filter headers that follow from every peer, which
+	// all agree with ours before them, leaving out a peer that doesn't.
+	prevHeader, err := store.FetchHeaderByHeight(start - 1)
+	if err != nil {
+		return err
+	}
+	headers, numHeaders := b.getCFHeadersForAllPeers(start, fType)
+	peerHeaders := make(map[string][]chainhash.Hash, len(headers))
+	for peer, msg := range headers {
+		if msg.PrevFilterHeader != *prevHeader {
+			continue
+		}
+
+		filterHeaders := make([]chainhash.Hash, len(msg.FilterHashes))
+		filterHeader := msg.PrevFilterHeader
+		for i, hash := range msg.FilterHashes {
+			// header = dsha256(filterHash || prevHeader)
+			filterHeader = chainhash.DoubleHashH(
+				append(hash[:], filterHeader[:]...),
+			)
+			filterHeaders[i] = filterHeader
+		}
+		peerHeaders[peer] = filterHeaders
+	}
+
+	// Then we'll find the first block whose filter header differs between
+	// us and any peer.
+	var (
+		height    uint32
+		ourHeader *chainhash.Hash
+	)
+findDifference:
+	for i := 0; i < numHeaders && start+uint32(i) <= storeTip; i++ {
+		header, err := store.FetchHeaderByHeight(start + uint32(i))
+		if err != nil {
+			return err
+		}
+
+		for _, filterHeaders := range peerHeaders {
+			if filterHeaders[i] != *header {
+				height = start + uint32(i)
+				ourHeader = header
+				break findDifference
+			}
+		}
+	}
+	if ourHeader == nil {
+		return fmt.Errorf("no peer's filter headers differ from ours "+
+			"from height %d", start)
+	}
+
+	// The filter built from the block settles who's right, as every peer
+	// agrees with our filter header for the block before.
+	blockHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(height)
+	if err != nil {
+		return err
+	}
+	blockHash := blockHeader.BlockHash()
+	block, err := b.server.fetchBlock(
+		wire.NewInvVect(wire.InvTypeBlock, &blockHash), height,
+	)
+	if err != nil {
+		return err
+	}
+	filter, err := builder.BuildBasicFilter(block.MsgBlock())
+	if err != nil {
+		return err
+	}
+	prevHeader, err = store.FetchHeaderByHeight(height - 1)
+	if err != nil {
+		return err
+	}
+	want, err := builder.MakeHeaderForFilter(filter, *prevHeader)
+	if err != nil {
+		return err
+	}
+
+	// The filter headers we compared were for another chain if a reorg
+	// replaced the block in the meantime.
+	blockHeader, err = b.server.BlockHeaders.FetchHeaderByHeight(height)
+	if err != nil || blockHeader.BlockHash() != blockHash {
+		return fmt.Errorf("block %v at height %d was replaced while "+
+			"checking its filter header", blockHash, height)
+	}
+
+	var (
+		peerRight bool
+		wrong     []string
+	)
+	for peer, filterHeaders := range peerHeaders {
+		if filterHeaders[height-start] == want {
+			peerRight = true
+		} else {
+			wrong = append(wrong, peer)
+		}
+	}
+	if *ourHeader != want && !peerRight {
+		return fmt.Errorf("neither our filter header nor any peer's "+
+			"for block %v at height %d matches its filter",
+			blockHash, height)
+	}
+
+	for _, peer := range wrong {
+		log.Warnf("Banning peer %v, as its filter header for block %v "+
+			"at height %d doesn't match the block's filter", peer,
+			blockHash, height)
+
+		err := b.server.BanPeer(peer, banman.InvalidFilterHeader)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peer, err)
+		}
+		if sp := b.server.PeerByAddr(peer); sp != nil {
+			sp.Disconnect()
+		}
+	}
+
+	if *ourHeader == want {
+		return nil
+	}
+
+	log.Warnf("Our filter header for block %v at height %d doesn't match "+
+		"the block's filter, rolling the filter headers back to height "+
+		"%d", blockHash, height, height-1)
+
+	return b.rollBackFilterHeaders(height - 1)
+}
+
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
 // returns a map of responses from all peers. The second return value is the
 // number for cfheaders in each response.
@@ -1773,7 +2060,7 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	numHeaders := int(stopHeight - height + 1)
 
 	// Send the query to all peers and record their responses in the map.
-	b.server.queryAllPeers(
+	b.queries.queryAllPeers(
 		msg,
 		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
 			peerQuit chan<- struct{}) {
@@ -3331,6 +3618,82 @@ func (b *blockManager) notifyFilterHeaderRollback(height uint32) {
 
 		rollbacks <- lowest
 	}
+}
+
+// rollBackFilterHeaders rolls the filter headers back to the given height, as
+// a repair does once it finds them wrong above it, and drops the filters we
+// hold for the blocks above it, which were checked against them. Subscribers
+// to rollbacks of the filter headers are notified, so that rescans scan those
+// blocks again once their filter headers are synced again. The blocks aren't
+// notified as disconnected, as they're still in the chain, but block
+// subscribers are notified of them as connected again then.
+func (b *blockManager) rollBackFilterHeaders(height uint32) error {
+	store := b.server.RegFilterHeaders
+
+	// Filter queries hold this lock to keep and return the filters they
+	// fetch, and we'll count the rollback under it, so that a query that
+	// read the filter headers we drop keeps and returns none.
+	b.server.filterGenMtx.Lock()
+	defer b.server.filterGenMtx.Unlock()
+
+	_, tipHeight, err := store.ChainTip()
+	if err != nil {
+		return err
+	}
+	if tipHeight <= height {
+		return nil
+	}
+	b.server.filterGen++
+
+	// We'll drop the filters first, so that should we fail to roll back
+	// the filter headers, we'll fetch the filters again rather than keep
+	// ones that were checked against filter headers that are wrong.
+	batch := make([]*chainhash.Hash, 0, filterRollbackBatchSize)
+	for h := height + 1; h <= tipHeight; h++ {
+		header, err := b.server.BlockHeaders.FetchHeaderByHeight(h)
+		if err != nil {
+			return err
+		}
+		hash := header.BlockHash()
+
+		_, err = b.server.FilterCache.Delete(cache.FilterCacheKey{
+			BlockHash:  hash,
+			FilterType: filterdb.RegularFilter,
+		})
+		if err != nil {
+			return err
+		}
+
+		batch = append(batch, &hash)
+		if len(batch) == filterRollbackBatchSize || h == tipHeight {
+			err := b.server.FilterDB.DeleteFilters(
+				batch, filterdb.RegularFilter,
+			)
+			if err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+	}
+
+	newTip, err := b.server.BlockHeaders.FetchHeaderByHeight(height)
+	if err != nil {
+		return err
+	}
+	newTipHash := newTip.BlockHash()
+	if _, err := store.RollbackToHeight(height, &newTipHash); err != nil {
+		return err
+	}
+
+	b.newFilterHeadersMtx.Lock()
+	b.filterHeaderTip = height
+	b.filterHeaderTipHash = newTipHash
+	b.newFilterHeadersMtx.Unlock()
+	b.newFilterHeadersSignal.Broadcast()
+
+	b.notifyFilterHeaderRollback(height)
+
+	return nil
 }
 
 // NotificationsSinceHeight returns a backlog of block notifications starting

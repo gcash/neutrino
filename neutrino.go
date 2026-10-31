@@ -632,6 +632,13 @@ type ChainService struct {
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
 
+	// filterGenMtx guards filterGen, which counts the rollbacks of the
+	// filter headers. A filter query keeps or returns no filter once the
+	// filter headers it read are rolled back, as it checked its filters
+	// against filter headers that may have been wrong.
+	filterGenMtx sync.Mutex
+	filterGen    uint64
+
 	userAgentName    string
 	userAgentVersion string
 

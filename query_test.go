@@ -516,3 +516,228 @@ func TestGetCFilterNotFetched(t *testing.T) {
 		}
 	}
 }
+
+// TestGetCFilterRequestsRepair checks that GetCFilter asks for a repair of the
+// filter headers when the only filters peers serve for a block don't match its
+// filter header, and not when a peer serves one that does, or none at all.
+func TestGetCFilterRequestsRepair(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		served     []string
+		wantFilter bool
+		wantRepair bool
+	}{
+		{
+			name:       "only filters that don't match",
+			served:     []string{"bad", "bad"},
+			wantRepair: true,
+		},
+		{
+			name:       "a filter that matches",
+			served:     []string{"bad", "good"},
+			wantFilter: true,
+		},
+		{
+			name: "no filters",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
+			if err != nil {
+				t.Fatalf("unable to set up ChainService: %v", err)
+			}
+			defer cleanUp()
+
+			// Add a block above genesis with the filter header of
+			// the good filter.
+			genesis, _, err := hdrStore.ChainTip()
+			if err != nil {
+				t.Fatal(err)
+			}
+			header := wire.BlockHeader{
+				PrevBlock: genesis.BlockHash(), Nonce: 1,
+			}
+			blockHash := header.BlockHash()
+			err = hdrStore.WriteHeaders(headerfs.BlockHeader{
+				BlockHeader: &header,
+				Height:      1,
+			})
+			if err != nil {
+				t.Fatalf("unable to write block header: %v", err)
+			}
+
+			filters := make(map[string]*gcs.Filter)
+			for i, name := range []string{"good", "bad"} {
+				filters[name], err = builder.WithKeyHash(&blockHash).
+					AddEntry([]byte{byte(i)}).Build()
+				if err != nil {
+					t.Fatalf("unable to build filter: %v", err)
+				}
+			}
+			genesisFilterHeader, _, err := cfStore.ChainTip()
+			if err != nil {
+				t.Fatal(err)
+			}
+			filterHeader, err := builder.MakeHeaderForFilter(
+				filters["good"], *genesisFilterHeader,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = cfStore.WriteHeaders(headerfs.FilterHeader{
+				HeaderHash: blockHash,
+				FilterHash: filterHeader,
+				Height:     1,
+			})
+			if err != nil {
+				t.Fatalf("unable to write filter header: %v", err)
+			}
+
+			db, err := walletdb.Create(
+				"bdb", filepath.Join(t.TempDir(), "filters.db"),
+				true,
+			)
+			if err != nil {
+				t.Fatalf("unable to create db: %v", err)
+			}
+			defer func() { _ = db.Close() }()
+			filterDB, err := filterdb.New(db, chaincfg.SimNetParams)
+			if err != nil {
+				t.Fatalf("unable to create filter db: %v", err)
+			}
+
+			cs := bm.server
+			cs.blockManager = bm
+			cs.FilterDB = filterDB
+			cs.FilterCache = lru.NewCache(1000)
+			cs.quit = make(chan struct{})
+			cs.queryPeers = func(_ wire.Message, f func(*ServerPeer,
+				wire.Message, chan<- struct{}), _ ...QueryOption) {
+
+				quit := make(chan struct{})
+				for _, name := range test.served {
+					data, _ := filters[name].NBytes()
+					f(nil, wire.NewMsgCFilter(
+						wire.GCSFilterRegular, &blockHash,
+						data,
+					), quit)
+
+					select {
+					case <-quit:
+						return
+					default:
+					}
+				}
+			}
+
+			filter, err := cs.GetCFilter(
+				blockHash, wire.GCSFilterRegular,
+			)
+			if test.wantFilter {
+				if err != nil || filter == nil {
+					t.Fatalf("expected the good filter, got "+
+						"%v, %v", filter, err)
+				}
+			} else if !errors.Is(err, ErrFilterFetchFailed) {
+				t.Fatalf("expected ErrFilterFetchFailed, got "+
+					"%v, %v", filter, err)
+			}
+
+			// GetCFilter can return before its query is done,
+			// which we'll wait for, as the query holds the lock on
+			// filter queries until then.
+			cs.mtxCFilter.Lock()
+			bm.newHeadersMtx.Lock()
+			requested := bm.filterRepairRequested
+			bm.newHeadersMtx.Unlock()
+			cs.mtxCFilter.Unlock()
+			if requested != test.wantRepair {
+				t.Fatalf("expected a repair of the filter "+
+					"headers requested %v, got %v",
+					test.wantRepair, requested)
+			}
+		})
+	}
+}
+
+// TestGetCFilterAfterRollback checks that a filter query that read the filter
+// headers before they're rolled back ends at the next filter served, and
+// neither returns nor keeps a filter that matches them, nor asks for a repair
+// of them for a filter that didn't match them, so that the filter is fetched
+// again with the filter headers that replace them.
+func TestGetCFilterAfterRollback(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 1500)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip)
+	cs := rt.bm.server
+	cs.quit = make(chan struct{})
+
+	// A peer serves the right filter, which doesn't match the filter
+	// headers, and they're rolled back before it serves it again and then
+	// the filter that matches them.
+	blockHash := rt.blockHashes[rt.divergence]
+	served := make([][]byte, 0, 2)
+	for _, chain := range []*filterChain{rt.right, rt.wrong} {
+		data, err := chain.filters[rt.divergence].NBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		served = append(served, data)
+	}
+	cs.queryPeers = func(_ wire.Message, f func(*ServerPeer,
+		wire.Message, chan<- struct{}), _ ...QueryOption) {
+
+		quit := make(chan struct{})
+		f(nil, wire.NewMsgCFilter(
+			wire.GCSFilterRegular, &blockHash, served[0],
+		), quit)
+
+		err := rt.bm.rollBackFilterHeaders(rt.divergence - 1)
+		if err != nil {
+			t.Errorf("unable to roll back filter headers: %v", err)
+		}
+		f(nil, wire.NewMsgCFilter(
+			wire.GCSFilterRegular, &blockHash, served[0],
+		), quit)
+		select {
+		case <-quit:
+		default:
+			t.Error("expected the query to end once the filter " +
+				"headers were rolled back")
+		}
+
+		f(nil, wire.NewMsgCFilter(
+			wire.GCSFilterRegular, &blockHash, served[1],
+		), quit)
+	}
+
+	filter, err := cs.GetCFilter(blockHash, wire.GCSFilterRegular)
+	if filter != nil || !errors.Is(err, ErrFilterFetchFailed) {
+		t.Fatalf("expected ErrFilterFetchFailed, got %v, %v", filter,
+			err)
+	}
+
+	// We'll wait for the query to be done, as it holds the lock on filter
+	// queries until then.
+	cs.mtxCFilter.Lock()
+	cached, err := cs.getFilterFromCache(&blockHash, filterdb.RegularFilter)
+	rt.bm.newHeadersMtx.Lock()
+	requested := rt.bm.filterRepairRequested
+	rt.bm.newHeadersMtx.Unlock()
+	cs.mtxCFilter.Unlock()
+
+	if cached != nil || err != cache.ErrElementNotFound {
+		t.Fatalf("expected the filter not to be cached, got %v, %v",
+			cached, err)
+	}
+	if requested {
+		t.Fatal("expected no repair of the filter headers requested")
+	}
+}

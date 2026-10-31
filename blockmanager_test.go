@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/peer"
 	"github.com/gcash/bchd/txscript"
+	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/neutrino/banman"
 
@@ -22,6 +25,8 @@ import (
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/walletdb"
 	"github.com/gcash/neutrino/blockntfns"
+	"github.com/gcash/neutrino/cache/lru"
+	"github.com/gcash/neutrino/filterdb"
 	"github.com/gcash/neutrino/headerfs"
 )
 
@@ -1658,4 +1663,964 @@ func TestFilterHeaderRollbackSubscriptions(t *testing.T) {
 	defer cancel3()
 	assertRollback(rollbacks3, 80)
 	assertNoRollback(rollbacks3)
+}
+
+// repairTestTip is the height of the chain that the tests of repairing the
+// filter headers build, past two filter checkpoints.
+const repairTestTip = 2*wire.CFCheckptInterval + 500
+
+// filterChain is a chain of filter headers, with the filter hash each commits
+// to, and the filter served for a block, if any, by height.
+type filterChain struct {
+	hashes  []chainhash.Hash
+	headers []chainhash.Hash
+	filters map[uint32]*gcs.Filter
+}
+
+// newFilterChain builds a chain of filter headers on top of the given genesis
+// filter header from the given filter hashes, by height.
+func newFilterChain(genesis chainhash.Hash, hashes []chainhash.Hash,
+	filters map[uint32]*gcs.Filter) *filterChain {
+
+	headers := make([]chainhash.Hash, len(hashes))
+	headers[0] = genesis
+	for height := 1; height < len(hashes); height++ {
+		// header = dsha256(filterHash || prevHeader)
+		headers[height] = chainhash.DoubleHashH(
+			append(hashes[height][:], headers[height-1][:]...),
+		)
+	}
+
+	return &filterChain{hashes: hashes, headers: headers, filters: filters}
+}
+
+// mockFilterPeers is a QueryAccess whose peers answer queries for filter
+// checkpoints, filter headers and filters from their own filter chain.
+type mockFilterPeers struct {
+	blockHashes []chainhash.Hash
+	heights     map[chainhash.Hash]uint32
+	chains      map[string]*filterChain
+
+	// checkpoints, if it holds a chain for a peer, is the chain the peer
+	// serves its filter checkpoints from instead.
+	checkpoints map[string]*filterChain
+}
+
+func (m *mockFilterPeers) queryAllPeers(msg wire.Message,
+	checkResponse func(sp *ServerPeer, resp wire.Message,
+		quit chan<- struct{}, peerQuit chan<- struct{}),
+	_ ...QueryOption) {
+
+	for addr, chain := range m.chains {
+		var resp wire.Message
+		switch msg := msg.(type) {
+		case *wire.MsgGetCFCheckpt:
+			if cpChain, ok := m.checkpoints[addr]; ok {
+				chain = cpChain
+			}
+			stop := m.heights[msg.StopHash]
+			cp := wire.NewMsgCFCheckpt(
+				msg.FilterType, &msg.StopHash,
+				int(stop/wire.CFCheckptInterval),
+			)
+			for height := uint32(wire.CFCheckptInterval); height <= stop; height += wire.CFCheckptInterval {
+				_ = cp.AddCFHeader(&chain.headers[height])
+			}
+			resp = cp
+
+		case *wire.MsgGetCFHeaders:
+			resp = m.cfHeaders(chain, msg)
+
+		case *wire.MsgGetCFilters:
+			filter, ok := chain.filters[msg.StartHeight]
+			if !ok {
+				continue
+			}
+			data, _ := filter.NBytes()
+			resp = wire.NewMsgCFilter(
+				msg.FilterType, &m.blockHashes[msg.StartHeight],
+				data,
+			)
+
+		default:
+			continue
+		}
+
+		pp, err := peer.NewOutboundPeer(&peer.Config{}, addr)
+		if err != nil {
+			panic(err)
+		}
+		checkResponse(
+			&ServerPeer{Peer: pp}, resp, make(chan struct{}),
+			make(chan struct{}),
+		)
+	}
+}
+
+// cfHeaders answers the given query for filter headers from the given chain.
+func (m *mockFilterPeers) cfHeaders(chain *filterChain,
+	msg *wire.MsgGetCFHeaders) *wire.MsgCFHeaders {
+
+	headers := wire.NewMsgCFHeaders()
+	headers.FilterType = msg.FilterType
+	headers.StopHash = msg.StopHash
+	headers.PrevFilterHeader = chain.headers[msg.StartHeight-1]
+	stop := m.heights[msg.StopHash]
+	for height := msg.StartHeight; height <= stop; height++ {
+		_ = headers.AddCFHash(&chain.hashes[height])
+	}
+
+	return headers
+}
+
+var _ QueryAccess = (*mockFilterPeers)(nil)
+
+// Peers of the tests of repairing the filter headers.
+const (
+	repairPeer1 = "10.0.0.1:8333"
+	repairPeer2 = "10.0.0.2:8333"
+	repairPeer3 = "10.0.0.3:8333"
+	repairPeer4 = "10.0.0.4:8333"
+)
+
+// repairTest is a block manager whose block headers run to a tip, and the
+// filter chains that the tests of repairing the filter headers serve and
+// store. The chains share made up filter hashes but where they diverge, at the
+// block whose header is that of block 170 of mainnet. There, the right chain
+// commits to the block's filter, and the wrong and other chains to filters
+// that each leave out a script the block pays.
+type repairTest struct {
+	bm          *blockManager
+	cfStore     *headerfs.FilterHeaderStore
+	peers       *mockFilterPeers
+	block       *bchutil.Block
+	divergence  uint32
+	tip         uint32
+	blockHashes []chainhash.Hash
+
+	right, wrong, other *filterChain
+}
+
+// filterWithout returns the filter of the given block built as though its
+// second transaction didn't pay the script of the given output.
+func filterWithout(t *testing.T, block *bchutil.Block, output int) *gcs.Filter {
+	t.Helper()
+
+	spend := block.MsgBlock().Transactions[1].Copy()
+	spend.TxOut[output].PkScript = nil
+	filter, err := builder.BuildBasicFilter(&wire.MsgBlock{
+		Header: block.MsgBlock().Header,
+		Transactions: []*wire.MsgTx{
+			block.MsgBlock().Transactions[0], spend,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unable to build filter: %v", err)
+	}
+
+	return filter
+}
+
+// newTestFilterDB creates a filter database that's removed once the test ends.
+func newTestFilterDB(t *testing.T) filterdb.FilterDatabase {
+	t.Helper()
+
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(t.TempDir(), "filters.db"), true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create filter db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	filterDB, err := filterdb.New(db, chaincfg.SimNetParams)
+	if err != nil {
+		t.Fatalf("unable to create filter db: %v", err)
+	}
+
+	return filterDB
+}
+
+// setupRepairTest sets up a repairTest whose block headers run to
+// repairTestTip and whose filter chains diverge at the given height, with no
+// peers and no filter headers stored.
+func setupRepairTest(t *testing.T, divergence uint32) *repairTest {
+	t.Helper()
+
+	return setupRepairTestTo(t, divergence, repairTestTip, false)
+}
+
+// setupRepairTestTo sets up a repairTest whose block headers run to the given
+// tip and whose filter chains diverge at the given height, with no peers and no
+// filter headers stored. The block headers are as old as the genesis block's,
+// unless synced is set, in which case they're recent, so that the block
+// manager takes them as synced.
+func setupRepairTestTo(t *testing.T, divergence, tip uint32,
+	synced bool) *repairTest {
+
+	t.Helper()
+
+	bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
+	if err != nil {
+		t.Fatalf("unable to set up ChainService: %v", err)
+	}
+	t.Cleanup(cleanUp)
+
+	blocks, err := loadBlocks(t, blockDataFile, blockDataNet)
+	if err != nil {
+		t.Fatalf("unable to load blocks: %v", err)
+	}
+
+	// Block 170 spends an output and pays two scripts.
+	block := blocks[170]
+
+	genesis, _, err := hdrStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockHashes := make([]chainhash.Hash, tip+1)
+	blockHashes[0] = genesis.BlockHash()
+	heights := map[chainhash.Hash]uint32{blockHashes[0]: 0}
+	blockHeaders := make([]headerfs.BlockHeader, 0, tip)
+	for height := uint32(1); height <= tip; height++ {
+		header := &wire.BlockHeader{
+			PrevBlock: blockHashes[height-1],
+			Timestamp: genesis.Timestamp,
+			Nonce:     height,
+		}
+		if synced {
+			header.Timestamp = time.Unix(time.Now().Unix(), 0)
+		}
+		if height == divergence {
+			header = &block.MsgBlock().Header
+		}
+
+		blockHashes[height] = header.BlockHash()
+		heights[blockHashes[height]] = height
+		blockHeaders = append(blockHeaders, headerfs.BlockHeader{
+			BlockHeader: header,
+			Height:      height,
+		})
+	}
+	if err := hdrStore.WriteHeaders(blockHeaders...); err != nil {
+		t.Fatalf("unable to write block headers: %v", err)
+	}
+	bm.headerTip = tip
+	bm.headerTipHash = blockHashes[tip]
+
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := make([]chainhash.Hash, tip+1)
+	for height := range hashes {
+		hashes[height] = chainhash.HashH(
+			[]byte{byte(height), byte(height >> 8)},
+		)
+	}
+	chainWith := func(filter *gcs.Filter) *filterChain {
+		chainHashes := slices.Clone(hashes)
+		filterHash, err := builder.GetFilterHash(filter)
+		if err != nil {
+			t.Fatalf("unable to hash filter: %v", err)
+		}
+		chainHashes[divergence] = filterHash
+
+		return newFilterChain(
+			*genesisFilterHeader, chainHashes,
+			map[uint32]*gcs.Filter{divergence: filter},
+		)
+	}
+	right, err := builder.BuildBasicFilter(block.MsgBlock())
+	if err != nil {
+		t.Fatalf("unable to build filter: %v", err)
+	}
+
+	cs := bm.server
+	cs.blockManager = bm
+	cs.timeSource = blockchain.NewMedianTime()
+	cs.FilterCache = lru.NewCache(1 << 20)
+	cs.FilterDB = newTestFilterDB(t)
+
+	// Only the block whose header is real can be fetched.
+	cs.queryPeers = func(msg wire.Message, f func(*ServerPeer,
+		wire.Message, chan<- struct{}), _ ...QueryOption) {
+
+		getData, ok := msg.(*wire.MsgGetData)
+		if !ok || len(getData.InvList) != 1 ||
+			getData.InvList[0].Hash != *block.Hash() {
+
+			return
+		}
+		f(nil, block.MsgBlock(), make(chan struct{}))
+	}
+
+	peers := &mockFilterPeers{
+		blockHashes: blockHashes,
+		heights:     heights,
+		chains:      make(map[string]*filterChain),
+		checkpoints: make(map[string]*filterChain),
+	}
+	bm.queries = peers
+
+	return &repairTest{
+		bm:          bm,
+		cfStore:     cfStore,
+		peers:       peers,
+		block:       block,
+		divergence:  divergence,
+		tip:         tip,
+		blockHashes: blockHashes,
+		right:       chainWith(right),
+		wrong:       chainWith(filterWithout(t, block, 0)),
+		other:       chainWith(filterWithout(t, block, 1)),
+	}
+}
+
+// storeFilterChain stores the filter headers of the given chain up to the given
+// height.
+func (rt *repairTest) storeFilterChain(t *testing.T, chain *filterChain,
+	tip uint32) {
+
+	t.Helper()
+
+	headers := make([]headerfs.FilterHeader, 0, tip)
+	for height := uint32(1); height <= tip; height++ {
+		headers = append(headers, headerfs.FilterHeader{
+			HeaderHash: rt.blockHashes[height],
+			FilterHash: chain.headers[height],
+			Height:     height,
+		})
+	}
+	if err := rt.cfStore.WriteHeaders(headers...); err != nil {
+		t.Fatalf("unable to write filter headers: %v", err)
+	}
+
+	rt.bm.filterHeaderTip = tip
+	rt.bm.filterHeaderTipHash = rt.blockHashes[tip]
+}
+
+// assertFilterTip asserts that the stored filter headers end with the given
+// chain's at the given height, and that the block manager knows it.
+func (rt *repairTest) assertFilterTip(t *testing.T, chain *filterChain,
+	tip uint32) {
+
+	t.Helper()
+
+	header, height, err := rt.cfStore.ChainTip()
+	if err != nil {
+		t.Fatalf("unable to get filter tip: %v", err)
+	}
+	if height != tip || *header != chain.headers[tip] {
+		t.Fatalf("expected filter tip %v at height %d, got %v at "+
+			"height %d", chain.headers[tip], tip, header, height)
+	}
+
+	rt.bm.newFilterHeadersMtx.RLock()
+	defer rt.bm.newFilterHeadersMtx.RUnlock()
+	if rt.bm.filterHeaderTip != tip ||
+		rt.bm.filterHeaderTipHash != rt.blockHashes[tip] {
+
+		t.Fatalf("block manager has filter tip %v at height %d, "+
+			"expected %v at height %d", rt.bm.filterHeaderTipHash,
+			rt.bm.filterHeaderTip, rt.blockHashes[tip], tip)
+	}
+}
+
+// assertBanned asserts that exactly the given peers are banned.
+func (rt *repairTest) assertBanned(t *testing.T, banned ...string) {
+	t.Helper()
+
+	for _, addr := range []string{
+		repairPeer1, repairPeer2, repairPeer3, repairPeer4,
+	} {
+		want := slices.Contains(banned, addr)
+		if got := rt.bm.server.IsBanned(addr); got != want {
+			t.Fatalf("expected peer %v banned %v, got %v", addr,
+				want, got)
+		}
+	}
+}
+
+// TestRepairFilterHeaders checks that a repair of the filter headers finds the
+// first block whose filter header differs between us and a peer, and settles
+// who's right from the block's filter: it rolls the filter headers back to the
+// block before when a peer is right, bans the peers that are wrong, and does
+// neither when no peer differs or no one is right.
+func TestRepairFilterHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		divergence uint32
+
+		// store and peers name the chains stored and served, and
+		// checkpoints the chains peers serve their checkpoints from
+		// instead, if any.
+		store       string
+		peers       map[string]string
+		checkpoints map[string]string
+
+		wantErr      bool
+		wantRollback bool
+		wantBanned   []string
+	}{
+		{
+			name:       "wrong filter headers before a checkpoint",
+			divergence: 500,
+			store:      "wrong",
+			peers: map[string]string{
+				repairPeer1: "right", repairPeer2: "right",
+				repairPeer3: "wrong",
+			},
+			wantRollback: true,
+			wantBanned:   []string{repairPeer3},
+		},
+		{
+			name:       "wrong filter headers between checkpoints",
+			divergence: 1500,
+			store:      "wrong",
+			peers: map[string]string{
+				repairPeer1: "right", repairPeer2: "right",
+				repairPeer3: "wrong",
+			},
+			wantRollback: true,
+			wantBanned:   []string{repairPeer3},
+		},
+		{
+			name:       "wrong filter headers after the last checkpoint",
+			divergence: 2300,
+			store:      "wrong",
+			peers: map[string]string{
+				repairPeer1: "right", repairPeer3: "wrong",
+			},
+			wantRollback: true,
+			wantBanned:   []string{repairPeer3},
+		},
+		{
+			name:       "a peer serving filter headers that are wrong",
+			divergence: 1500,
+			store:      "right",
+			peers: map[string]string{
+				repairPeer1: "right", repairPeer3: "wrong",
+			},
+			wantBanned: []string{repairPeer3},
+		},
+		{
+			name:       "a peer whose filter headers don't follow its checkpoints",
+			divergence: 1500,
+			store:      "wrong",
+			peers: map[string]string{
+				repairPeer1: "right", repairPeer3: "wrong",
+				repairPeer4: "early",
+			},
+			checkpoints: map[string]string{
+				repairPeer4: "right",
+			},
+			wantRollback: true,
+			wantBanned:   []string{repairPeer3},
+		},
+		{
+			name:       "no peer differs",
+			divergence: 1500,
+			store:      "right",
+			peers: map[string]string{
+				repairPeer1: "right", repairPeer2: "right",
+			},
+			wantErr: true,
+		},
+		{
+			name:       "no one matches the block",
+			divergence: 1500,
+			store:      "wrong",
+			peers: map[string]string{
+				repairPeer1: "other",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt := setupRepairTest(t, test.divergence)
+
+			// The early chain diverges from the right one before
+			// the filter checkpoint below the divergence.
+			early := slices.Clone(rt.right.hashes)
+			early[wire.CFCheckptInterval-100] = chainhash.Hash{1}
+			chains := map[string]*filterChain{
+				"right": rt.right,
+				"wrong": rt.wrong,
+				"other": rt.other,
+				"early": newFilterChain(
+					rt.right.headers[0], early, nil,
+				),
+			}
+			for addr, name := range test.peers {
+				rt.peers.chains[addr] = chains[name]
+			}
+			for addr, name := range test.checkpoints {
+				rt.peers.checkpoints[addr] = chains[name]
+			}
+
+			stored := chains[test.store]
+			rt.storeFilterChain(t, stored, repairTestTip)
+			rollbacks, cancel := rt.bm.subscribeFilterHeaderRollbacks()
+			defer cancel()
+
+			// Looking up the peers to disconnect returns right
+			// away once the ChainService quits.
+			rt.bm.server.quit = make(chan struct{})
+			close(rt.bm.server.quit)
+
+			err := rt.bm.repairFilterHeaders()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("expected error %v, got %v",
+					test.wantErr, err)
+			}
+
+			rt.assertBanned(t, test.wantBanned...)
+
+			if !test.wantRollback {
+				rt.assertFilterTip(t, stored, repairTestTip)
+				select {
+				case height := <-rollbacks:
+					t.Fatalf("unexpected rollback to height "+
+						"%d", height)
+				default:
+				}
+				return
+			}
+
+			rt.assertFilterTip(t, stored, test.divergence-1)
+			select {
+			case height := <-rollbacks:
+				if height != test.divergence-1 {
+					t.Fatalf("expected rollback to height "+
+						"%d, got %d", test.divergence-1,
+						height)
+				}
+			default:
+				t.Fatal("expected a rollback notification")
+			}
+		})
+	}
+}
+
+// TestRollBackFilterHeaders checks that rolling back the filter headers drops
+// them and the filters held for their blocks above the height, in batches
+// when there are many, leaves the rest, lets them be synced again, and notifies
+// subscribers, and that rolling back to the tip or above does nothing.
+func TestRollBackFilterHeaders(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 1500)
+	rt.storeFilterChain(t, rt.right, repairTestTip)
+	cs := rt.bm.server
+
+	// We'll hold filters for blocks below and above where we roll back
+	// to, more than a batch of blocks apart.
+	const rollBackTo = 100
+	heights := []uint32{rollBackTo, rollBackTo + 1, 2100, repairTestTip}
+	filter, err := builder.BuildBasicFilter(rt.block.MsgBlock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, height := range heights {
+		hash := rt.blockHashes[height]
+		_, err := cs.putFilterToCache(&hash, filterdb.RegularFilter, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = cs.FilterDB.PutFilter(&hash, filter, filterdb.RegularFilter)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rollbacks, cancel := rt.bm.subscribeFilterHeaderRollbacks()
+	defer cancel()
+
+	for _, height := range []uint32{repairTestTip, repairTestTip + 5} {
+		if err := rt.bm.rollBackFilterHeaders(height); err != nil {
+			t.Fatalf("unable to roll back to height %d: %v", height,
+				err)
+		}
+	}
+	rt.assertFilterTip(t, rt.right, repairTestTip)
+	select {
+	case height := <-rollbacks:
+		t.Fatalf("unexpected rollback to height %d", height)
+	default:
+	}
+
+	if err := rt.bm.rollBackFilterHeaders(rollBackTo); err != nil {
+		t.Fatalf("unable to roll back: %v", err)
+	}
+	rt.assertFilterTip(t, rt.right, rollBackTo)
+	select {
+	case height := <-rollbacks:
+		if height != rollBackTo {
+			t.Fatalf("expected rollback to height %d, got %d",
+				rollBackTo, height)
+		}
+	default:
+		t.Fatal("expected a rollback notification")
+	}
+
+	for _, height := range heights {
+		hash := rt.blockHashes[height]
+		want := height <= rollBackTo
+
+		cached, err := cs.getFilterFromCache(
+			&hash, filterdb.RegularFilter,
+		)
+		if (err == nil && cached != nil) != want {
+			t.Fatalf("expected filter for height %d cached %v, "+
+				"got %v, %v", height, want, cached, err)
+		}
+
+		stored, err := cs.FilterDB.FetchFilter(
+			&hash, filterdb.RegularFilter,
+		)
+		if (err == nil && stored != nil) != want {
+			t.Fatalf("expected filter for height %d stored %v, "+
+				"got %v, %v", height, want, stored, err)
+		}
+	}
+
+	// The filter headers can be synced again from there.
+	headers := make([]headerfs.FilterHeader, 0, repairTestTip-rollBackTo)
+	for height := uint32(rollBackTo + 1); height <= repairTestTip; height++ {
+		headers = append(headers, headerfs.FilterHeader{
+			HeaderHash: rt.blockHashes[height],
+			FilterHash: rt.right.headers[height],
+			Height:     height,
+		})
+	}
+	if err := rt.cfStore.WriteHeaders(headers...); err != nil {
+		t.Fatalf("unable to write filter headers: %v", err)
+	}
+	tip, height, err := rt.cfStore.ChainTip()
+	if err != nil || height != repairTestTip ||
+		*tip != rt.right.headers[repairTestTip] {
+
+		t.Fatalf("expected filter tip at height %d, got %v at height "+
+			"%d: %v", repairTestTip, tip, height, err)
+	}
+}
+
+// TestFilterHeaderRepairRequests checks that a request to repair the filter
+// headers wakes up a waiting cfHandler and is taken once, and that requests
+// are dropped while we back off after a repair that couldn't settle it.
+func TestFilterHeaderRepairRequests(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, cleanUp, err := setupBlockManager()
+	if err != nil {
+		t.Fatalf("unable to set up ChainService: %v", err)
+	}
+	defer cleanUp()
+
+	if bm.repairFilterHeadersIfRequested() {
+		t.Fatal("repaired the filter headers without a request")
+	}
+
+	// A request wakes up cfHandler as it waits for new headers. The waiter
+	// holds the lock until it waits, so once we hold it, it's waiting.
+	waiting, woken := make(chan struct{}), make(chan struct{})
+	go func() {
+		bm.newHeadersSignal.L.Lock()
+		close(waiting)
+		for !bm.filterRepairRequested {
+			bm.newHeadersSignal.Wait()
+		}
+		bm.newHeadersSignal.L.Unlock()
+		close(woken)
+	}()
+	<-waiting
+	bm.newHeadersSignal.L.Lock()
+	requested := bm.filterRepairRequested
+	bm.newHeadersSignal.L.Unlock()
+	if requested {
+		t.Fatal("expected no repair requested yet")
+	}
+	bm.requestFilterHeaderRepair()
+	select {
+	case <-woken:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the request to wake up a waiter")
+	}
+
+	// With only the genesis filter header stored, the repair can't settle
+	// anything, so we back off.
+	if !bm.repairFilterHeadersIfRequested() {
+		t.Fatal("expected the requested repair to be made")
+	}
+	if bm.repairFilterHeadersIfRequested() {
+		t.Fatal("expected the request to be taken once")
+	}
+
+	bm.requestFilterHeaderRepair()
+	if bm.repairFilterHeadersIfRequested() {
+		t.Fatal("expected a request to be dropped while backing off")
+	}
+
+	bm.newHeadersMtx.Lock()
+	bm.filterRepairBackoffUntil = time.Now().Add(-time.Second)
+	bm.newHeadersMtx.Unlock()
+	bm.requestFilterHeaderRepair()
+	if !bm.repairFilterHeadersIfRequested() {
+		t.Fatal("expected a request to be taken after backing off")
+	}
+}
+
+// TestResolveConflictRequestsRepair checks that resolveConflict asks for a
+// repair of the filter headers when our peers agree on filter checkpoints that
+// the filter headers we synced don't match, which trying again doesn't fix,
+// and that it resolves the checkpoints once the repair rolls them back.
+func TestResolveConflictRequestsRepair(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 1500)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip)
+	rt.peers.chains[repairPeer1] = rt.right
+	rt.peers.chains[repairPeer2] = rt.right
+
+	fType := wire.GCSFilterRegular
+	tipHash := rt.blockHashes[repairTestTip]
+	_, err := rt.bm.resolveConflict(
+		rt.bm.getCheckpts(&tipHash, fType), rt.cfStore, fType,
+	)
+	if err == nil {
+		t.Fatal("expected checkpoints that don't match our filter " +
+			"headers to be unresolved")
+	}
+	if !rt.bm.repairFilterHeadersIfRequested() {
+		t.Fatal("expected a repair of the filter headers requested")
+	}
+	rt.assertFilterTip(t, rt.wrong, rt.divergence-1)
+	rt.assertBanned(t)
+
+	checkpoints, err := rt.bm.resolveConflict(
+		rt.bm.getCheckpts(&tipHash, fType), rt.cfStore, fType,
+	)
+	if err != nil {
+		t.Fatalf("unable to resolve checkpoints after the repair: %v",
+			err)
+	}
+	if len(checkpoints) != 2 ||
+		*checkpoints[1] != rt.right.headers[2*wire.CFCheckptInterval] {
+
+		t.Fatalf("expected the right checkpoints, got %v", checkpoints)
+	}
+}
+
+// TestUncheckpointedCFHeadersRequestRepair checks that peers whose filter
+// headers don't follow ours at the tip have them left out and a repair of the
+// filter headers requested, rather than being banned, as they may be right,
+// and that the filter headers are synced from them once the repair rolls ours
+// back.
+func TestUncheckpointedCFHeadersRequestRepair(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 2300)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip-100)
+	rt.peers.chains[repairPeer1] = rt.right
+	rt.peers.chains[repairPeer2] = rt.right
+
+	err := rt.bm.getUncheckpointedCFHeaders(
+		rt.cfStore, wire.GCSFilterRegular,
+	)
+	if err == nil {
+		t.Fatal("expected no filter headers to follow ours")
+	}
+	rt.assertBanned(t)
+	rt.assertFilterTip(t, rt.wrong, repairTestTip-100)
+
+	if !rt.bm.repairFilterHeadersIfRequested() {
+		t.Fatal("expected a repair of the filter headers requested")
+	}
+	rt.assertFilterTip(t, rt.wrong, rt.divergence-1)
+	rt.assertBanned(t)
+
+	stopDraining := drainBlockNtfns(rt.bm)
+	defer stopDraining()
+	err = rt.bm.getUncheckpointedCFHeaders(
+		rt.cfStore, wire.GCSFilterRegular,
+	)
+	if err != nil {
+		t.Fatalf("unable to sync filter headers after the repair: %v",
+			err)
+	}
+	rt.assertFilterTip(t, rt.right, repairTestTip)
+}
+
+// TestDetectBadPeersWithWrongFilterHeaders checks that detectBadPeers settles
+// which peers serve a wrong filter from the block itself, even when the filter
+// header we synced for the block is the one that's wrong, which a block fetched
+// with GetBlock is checked against.
+func TestDetectBadPeersWithWrongFilterHeaders(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 1500)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip)
+	rt.peers.chains[repairPeer1] = rt.right
+	rt.peers.chains[repairPeer3] = rt.wrong
+
+	const start = wire.CFCheckptInterval + 1
+	headers, _ := rt.bm.getCFHeadersForAllPeers(
+		start, wire.GCSFilterRegular,
+	)
+	if len(headers) != 2 {
+		t.Fatalf("expected filter headers from 2 peers, got %d",
+			len(headers))
+	}
+
+	badPeers, err := rt.bm.detectBadPeers(
+		headers, rt.divergence, rt.divergence-start,
+		wire.GCSFilterRegular,
+	)
+	if err != nil {
+		t.Fatalf("unable to detect bad peers: %v", err)
+	}
+	err = assertBadPeers(map[string]struct{}{repairPeer3: {}}, badPeers)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// serveCheckpointedCFHeaders has the checkpointed sync of the filter headers
+// answered from the given chain.
+func (rt *repairTest) serveCheckpointedCFHeaders(chain *filterChain) {
+	rt.bm.server.queryBatch = func(msgs []wire.Message,
+		f func(*ServerPeer, wire.Message, wire.Message) bool,
+		_ <-chan struct{}, _ ...QueryOption) {
+
+		for _, msg := range msgs {
+			query, ok := msg.(*wire.MsgGetCFHeaders)
+			if !ok {
+				continue
+			}
+			f(nil, msg, rt.peers.cfHeaders(chain, query))
+		}
+	}
+}
+
+// waitForFilterTip waits for the stored filter headers to end with the given
+// chain's at the given height.
+func (rt *repairTest) waitForFilterTip(t *testing.T, chain *filterChain,
+	tip uint32) {
+
+	t.Helper()
+
+	deadline := time.Now().Add(time.Minute)
+	for {
+		header, height, err := rt.cfStore.ChainTip()
+		if err == nil && height == tip && *header == chain.headers[tip] {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for filter tip %v at height "+
+				"%d, got %v at height %d: %v",
+				chain.headers[tip], tip, header, height, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// runCFHandler runs the block manager's cfHandler until the test ends. Peers
+// to disconnect aren't looked up, as the ChainService has quit.
+func runCFHandler(t *testing.T, bm *blockManager) {
+	t.Helper()
+
+	bm.server.quit = make(chan struct{})
+	close(bm.server.quit)
+
+	stopDraining := drainBlockNtfns(bm)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bm.cfHandler()
+	}()
+
+	t.Cleanup(func() {
+		close(bm.quit)
+		for {
+			// cfHandler checks whether to quit once it's woken.
+			bm.newHeadersSignal.Broadcast()
+
+			select {
+			case <-done:
+				stopDraining()
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	})
+}
+
+// TestCFHandlerRepairsCheckpointConflict checks that cfHandler repairs the
+// filter headers when our peers agree on filter checkpoints that ours don't
+// match, rather than trying to resolve them without end, and then syncs the
+// right filter headers from the checkpoints and at the tip.
+func TestCFHandlerRepairsCheckpointConflict(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTestTo(t, 1500, repairTestTip, true)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip)
+	rt.peers.chains[repairPeer1] = rt.right
+	rt.peers.chains[repairPeer2] = rt.right
+	rt.serveCheckpointedCFHeaders(rt.right)
+	rollbacks, cancel := rt.bm.subscribeFilterHeaderRollbacks()
+	defer cancel()
+
+	runCFHandler(t, rt.bm)
+
+	rt.waitForFilterTip(t, rt.right, repairTestTip)
+	select {
+	case height := <-rollbacks:
+		if height != rt.divergence-1 {
+			t.Fatalf("expected rollback to height %d, got %d",
+				rt.divergence-1, height)
+		}
+	default:
+		t.Fatal("expected a rollback notification")
+	}
+	rt.assertBanned(t)
+}
+
+// TestCFHandlerRepairsWhileWaitingForHeaders checks that cfHandler repairs the
+// filter headers when asked to while it waits for more block headers, as it
+// does before they're synced, when a block downloaded or the filters peers
+// serve show them wrong.
+func TestCFHandlerRepairsWhileWaitingForHeaders(t *testing.T) {
+	t.Parallel()
+
+	// Block headers that aren't recent, fewer than a filter checkpoint
+	// interval past the filter headers, keep cfHandler waiting for more.
+	const tip = wire.CFCheckptInterval / 2
+	rt := setupRepairTestTo(t, tip/2, tip, false)
+	rt.storeFilterChain(t, rt.wrong, tip)
+	rt.peers.chains[repairPeer1] = rt.right
+	rollbacks, cancel := rt.bm.subscribeFilterHeaderRollbacks()
+	defer cancel()
+
+	runCFHandler(t, rt.bm)
+	rt.bm.requestFilterHeaderRepair()
+
+	select {
+	case height := <-rollbacks:
+		if height != rt.divergence-1 {
+			t.Fatalf("expected rollback to height %d, got %d",
+				rt.divergence-1, height)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("expected cfHandler to repair the filter headers")
+	}
+	rt.assertFilterTip(t, rt.wrong, rt.divergence-1)
+	rt.assertBanned(t)
 }

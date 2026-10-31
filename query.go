@@ -930,6 +930,16 @@ type cfiltersQuery struct {
 	targetHash    chainhash.Hash
 	filterChan    chan *gcs.Filter
 	options       []QueryOption
+
+	// mismatched holds the blocks a peer served a filter for that doesn't
+	// match the filter header we synced for it.
+	mismatched map[chainhash.Hash]struct{}
+
+	// gen is the count of rollbacks of the filter headers before we read
+	// them, and stale is set once they're rolled back again, which ends
+	// the query.
+	gen   uint64
+	stale bool
 }
 
 // queryMsg returns the wire message to perform this query.
@@ -944,6 +954,13 @@ func (q *cfiltersQuery) queryMsg() wire.Message {
 func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	filterType wire.FilterType, options ...QueryOption) (
 	*cfiltersQuery, error) {
+
+	// We'll note the count of rollbacks of the filter headers before we
+	// read them, so we can tell whether they're rolled back again before
+	// a filter we check against them arrives.
+	s.filterGenMtx.Lock()
+	gen := s.filterGen
+	s.filterGenMtx.Unlock()
 
 	_, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil {
@@ -1068,6 +1085,8 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 		targetHash:    blockHash,
 		filterChan:    filterChan,
 		options:       options,
+		mismatched:    make(map[chainhash.Hash]struct{}),
+		gen:           gen,
 	}, nil
 }
 
@@ -1075,6 +1094,11 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 // GetCFilters request.
 func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 	resp wire.Message, quit chan<- struct{}) {
+
+	// The query is over once the filter headers it read are rolled back.
+	if q.stale {
+		return
+	}
 
 	// We're only interested in "cfilter" messages.
 	response, ok := resp.(*wire.MsgCFilter)
@@ -1091,6 +1115,18 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 	// we either already got it, or it is out of our queried range.
 	i, ok := q.headerIndex[response.BlockHash]
 	if !ok {
+		return
+	}
+
+	// We'll only check, return and keep the filter while the filter
+	// headers we read stand, which holding the lock that rollbacks of them
+	// hold makes sure of. Otherwise the query is over, and the caller can
+	// fetch the filter again.
+	s.filterGenMtx.Lock()
+	defer s.filterGenMtx.Unlock()
+	if s.filterGen != q.gen {
+		q.stale = true
+		close(quit)
 		return
 	}
 
@@ -1114,7 +1150,11 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 		return
 	}
 
+	// Either the peer or the filter header we synced is wrong, which a
+	// repair of the filter headers can settle if no peer serves a filter
+	// that matches.
 	if gotHeader != curHeader {
+		q.mismatched[response.BlockHash] = struct{}{}
 		return
 	}
 
@@ -1255,6 +1295,27 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			numFilters := query.stopHeight - query.startHeight + 1
 			log.Errorf("Query failed with %d out of %d filters "+
 				"received", len(query.headerIndex), numFilters)
+
+			// If the filter headers were rolled back meanwhile,
+			// the query ended without checking every filter
+			// served against the filter headers that stand.
+			if query.stale {
+				return
+			}
+
+			// If the only filters served for a block we're missing
+			// don't match its filter header, the filter headers
+			// may be wrong, so we'll have them repaired.
+			for hash := range query.headerIndex {
+				if _, ok := query.mismatched[hash]; ok {
+					log.Warnf("Filters served for block %v "+
+						"don't match its filter header",
+						hash)
+					s.blockManager.requestFilterHeaderRepair()
+					break
+				}
+			}
+
 			return
 		}
 	}()
@@ -1319,6 +1380,35 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	if err != nil && err != cache.ErrElementNotFound {
 		return nil, err
 	}
+
+	foundBlock, err := s.fetchBlock(inv, height, options...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check the block against its filter header, since filters are only
+	// as good as the filter headers synced for them.
+	if err := s.verifyBlockFilter(foundBlock, height); err != nil {
+		return nil, err
+	}
+
+	// Add block to the cache before returning it.
+	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
+	if err != nil {
+		log.Warnf("couldn't write block to cache: %v", err)
+	}
+
+	return foundBlock, nil
+}
+
+// fetchBlock requests the block with the given inv vector and height from the
+// network, one peer at a time, until one answers with it. Unlike GetBlock, it
+// neither checks the block against its filter header nor caches it, so it can
+// be used to check the filter headers themselves.
+func (s *ChainService) fetchBlock(inv *wire.InvVect, height uint32,
+	options ...QueryOption) (*bchutil.Block, error) {
+
+	blockHash := inv.Hash
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
@@ -1403,18 +1493,6 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		}
 
 		return nil, fmt.Errorf("couldn't retrieve block %s from network", blockHash)
-	}
-
-	// Check the block against its filter header, since filters are only
-	// as good as the filter headers synced for them.
-	if err := s.verifyBlockFilter(foundBlock, height); err != nil {
-		return nil, err
-	}
-
-	// Add block to the cache before returning it.
-	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
-	if err != nil {
-		log.Warnf("couldn't write block to cache: %v", err)
 	}
 
 	return foundBlock, nil
