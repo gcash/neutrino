@@ -3,9 +3,11 @@ package neutrino_test
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -24,12 +26,15 @@ import (
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchlog"
 	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/wallet/txauthor"
 	"github.com/gcash/bchwallet/walletdb"
 	_ "github.com/gcash/bchwallet/walletdb/bdb"
 	"github.com/gcash/neutrino"
+	"github.com/gcash/neutrino/filterdb"
+	"github.com/gcash/neutrino/headerfs"
 )
 
 var (
@@ -1431,4 +1436,457 @@ func goroutineDump() string {
 	buf := make([]byte, 1<<18)
 	runtime.Stack(buf, true)
 	return string(buf)
+}
+
+// repairTimeout is how long the end to end test of repairing the filter
+// headers waits for each step, which takes seconds, but longer on slow CI
+// runners.
+const repairTimeout = 3 * time.Minute
+
+// recordingRescan is a rescan for an address that records the blocks it
+// notifies as connected, with the transactions relevant to the address, and
+// those it notifies as disconnected.
+type recordingRescan struct {
+	quit    chan struct{}
+	errChan <-chan error
+
+	mtx          sync.Mutex
+	relevant     map[int32][]*bchutil.Tx
+	disconnected map[int32]bool
+	height       int32
+}
+
+// startRecordingRescan starts a rescan for the given address from the given
+// block.
+func startRecordingRescan(svc *neutrino.ChainService, addr bchutil.Address,
+	start *waddrmgr.BlockStamp) *recordingRescan {
+
+	r := &recordingRescan{
+		quit:         make(chan struct{}),
+		relevant:     make(map[int32][]*bchutil.Tx),
+		disconnected: make(map[int32]bool),
+	}
+	rescan := neutrino.NewRescan(
+		&neutrino.RescanChainSource{ChainService: svc},
+		neutrino.QuitChan(r.quit),
+		neutrino.WatchAddrs(addr),
+		neutrino.StartBlock(start),
+		neutrino.QueryOptions(
+			neutrino.Timeout(2*time.Second), neutrino.NumRetries(0),
+		),
+		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
+			OnFilteredBlockConnected: func(height int32,
+				_ *wire.BlockHeader, txs []*bchutil.Tx) {
+
+				r.mtx.Lock()
+				r.relevant[height] = txs
+				r.height = height
+				r.mtx.Unlock()
+			},
+			OnFilteredBlockDisconnected: func(height int32,
+				_ *wire.BlockHeader) {
+
+				r.mtx.Lock()
+				delete(r.relevant, height)
+				r.disconnected[height] = true
+				r.height = height - 1
+				r.mtx.Unlock()
+			},
+		}),
+	)
+	r.errChan = rescan.Start()
+
+	return r
+}
+
+// waitFor waits for the given condition on what the rescan recorded to hold,
+// failing the test if the rescan ends first.
+func (r *recordingRescan) waitFor(t *testing.T, what string,
+	cond func() bool) {
+
+	t.Helper()
+
+	deadline := time.After(repairTimeout)
+	for {
+		r.mtx.Lock()
+		done := cond()
+		r.mtx.Unlock()
+		if done {
+			return
+		}
+
+		select {
+		case err := <-r.errChan:
+			t.Fatalf("rescan ended waiting for %v: %v", what, err)
+		case <-deadline:
+			t.Fatalf("timed out waiting for the rescan to %v", what)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// waitForHeight waits for the rescan to reach the given height.
+func (r *recordingRescan) waitForHeight(t *testing.T, height int32) {
+	t.Helper()
+
+	r.waitFor(t, "reach the tip", func() bool {
+		return r.height == height
+	})
+}
+
+// waitForPayment waits for the rescan to find the given transaction in the
+// block at the given height.
+func (r *recordingRescan) waitForPayment(t *testing.T, height int32,
+	txid chainhash.Hash) {
+
+	t.Helper()
+
+	r.waitFor(t, "find the payment", func() bool {
+		return r.found(height, txid)
+	})
+}
+
+// found returns whether the rescan found the given transaction in the block at
+// the given height.
+//
+// NOTE: The mutex must be held.
+func (r *recordingRescan) found(height int32, txid chainhash.Hash) bool {
+	for _, tx := range r.relevant[height] {
+		if *tx.Hash() == txid {
+			return true
+		}
+	}
+
+	return false
+}
+
+// rewoundPast returns whether the rescan notified the block at the given
+// height as disconnected.
+func (r *recordingRescan) rewoundPast(height int32) bool {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	return r.disconnected[height]
+}
+
+// stop stops the rescan and waits for it to end.
+func (r *recordingRescan) stop(t *testing.T) {
+	t.Helper()
+
+	close(r.quit)
+	select {
+	case err := <-r.errChan:
+		if !errors.Is(err, neutrino.ErrRescanExit) {
+			t.Fatalf("expected the rescan to exit, got %v", err)
+		}
+	case <-time.After(repairTimeout):
+		t.Fatal("timed out waiting for the rescan to exit")
+	}
+}
+
+// startChainService starts a ChainService on the given database that only
+// connects to the given node, and waits for it to connect.
+func startChainService(t *testing.T, dataDir string, db walletdb.DB,
+	node *rpctest.Harness) *neutrino.ChainService {
+
+	t.Helper()
+
+	svc, err := neutrino.NewChainService(neutrino.Config{
+		DataDir:      dataDir,
+		Database:     db,
+		ChainParams:  chaincfg.SimNetParams,
+		ConnectPeers: []string{node.P2PAddress()},
+	})
+	if err != nil {
+		t.Fatalf("unable to create ChainService: %v", err)
+	}
+	if err := svc.Start(); err != nil {
+		t.Fatalf("unable to start ChainService: %v", err)
+	}
+
+	deadline := time.Now().Add(repairTimeout)
+	for svc.ConnectedCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the ChainService to " +
+				"connect to the node")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return svc
+}
+
+// waitForFilterHeaders waits for the ChainService to sync the node's block and
+// filter headers, which, as each filter header commits to the ones before it,
+// are then all right.
+func waitForFilterHeaders(t *testing.T, svc *neutrino.ChainService,
+	node *rpctest.Harness) {
+
+	t.Helper()
+
+	bestHash, _, err := node.Node.GetBestBlock()
+	if err != nil {
+		t.Fatalf("unable to get best block: %v", err)
+	}
+	want, err := node.Node.GetCFilterHeader(
+		bestHash, wire.GCSFilterRegular,
+	)
+	if err != nil {
+		t.Fatalf("unable to get filter header: %v", err)
+	}
+
+	deadline := time.Now().Add(repairTimeout)
+	for {
+		best, err := svc.BestBlock()
+		if err == nil && best.Hash == *bestHash {
+			have, err := svc.RegFilterHeaders.FetchHeader(bestHash)
+			if err == nil && *have == want.PrevFilterHeader {
+				return
+			}
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the filter headers of "+
+				"block %v", bestHash)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// corruptFilterHeaders replaces the filter headers stored for the blocks from
+// the given height to the tip with ones that commit to empty filters, as
+// though peers had served them. If withFilters is set, it stores those filters
+// too, as a ChainService that persists the filters it fetches would have.
+func corruptFilterHeaders(t *testing.T, dataDir string, db walletdb.DB,
+	node *rpctest.Harness, from int32, withFilters bool) {
+
+	t.Helper()
+
+	store, err := headerfs.NewFilterHeaderStore(
+		dataDir, db, headerfs.RegularFilter, &chaincfg.SimNetParams,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("unable to open filter header store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	_, tip, err := store.ChainTip()
+	if err != nil {
+		t.Fatalf("unable to get filter tip: %v", err)
+	}
+	prevHash, err := node.Node.GetBlockHash(int64(from - 1))
+	if err != nil {
+		t.Fatalf("unable to get block hash: %v", err)
+	}
+	if _, err := store.RollbackToHeight(uint32(from-1), prevHash); err != nil {
+		t.Fatalf("unable to roll back filter headers: %v", err)
+	}
+	prev, err := store.FetchHeaderByHeight(uint32(from - 1))
+	if err != nil {
+		t.Fatalf("unable to get filter header: %v", err)
+	}
+
+	filterDB, err := filterdb.New(db, chaincfg.SimNetParams)
+	if err != nil {
+		t.Fatalf("unable to open filter db: %v", err)
+	}
+	empty, err := gcs.FromBytes(0, builder.DefaultP, builder.DefaultM, nil)
+	if err != nil {
+		t.Fatalf("unable to create filter: %v", err)
+	}
+
+	headers := make([]headerfs.FilterHeader, 0, tip-uint32(from)+1)
+	for height := uint32(from); height <= tip; height++ {
+		hash, err := node.Node.GetBlockHash(int64(height))
+		if err != nil {
+			t.Fatalf("unable to get block hash: %v", err)
+		}
+		header, err := builder.MakeHeaderForFilter(empty, *prev)
+		if err != nil {
+			t.Fatalf("unable to make filter header: %v", err)
+		}
+		headers = append(headers, headerfs.FilterHeader{
+			HeaderHash: *hash,
+			FilterHash: header,
+			Height:     height,
+		})
+		prev = &header
+
+		if !withFilters {
+			continue
+		}
+		err = filterDB.PutFilter(hash, empty, filterdb.RegularFilter)
+		if err != nil {
+			t.Fatalf("unable to store filter: %v", err)
+		}
+	}
+	if err := store.WriteHeaders(headers...); err != nil {
+		t.Fatalf("unable to write filter headers: %v", err)
+	}
+}
+
+// TestFilterHeaderRepair checks end to end that a ChainService whose filter
+// headers are wrong from a block below a payment repairs them, syncs them
+// again, and drops the filters checked against them, and that a rescan then
+// finds the payment. That's whether the rescan already went past the payment
+// with the wrong filters, started after the repair from above the payment, as
+// a wallet's does from where it got to before, or couldn't get past the wrong
+// filter headers until the repair.
+func TestFilterHeaderRepair(t *testing.T) {
+	node, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+	)
+	if err != nil {
+		t.Fatalf("unable to create harness: %v", err)
+	}
+	defer func() { _ = node.TearDown() }()
+	if err := node.SetUp(true, 10); err != nil {
+		t.Fatalf("unable to set up harness: %v", err)
+	}
+
+	// The node mines a payment to an address we watch, and a few blocks
+	// after it.
+	privKey, err := bchec.NewPrivateKey(bchec.S256())
+	if err != nil {
+		t.Fatalf("unable to generate key: %v", err)
+	}
+	addr, err := bchutil.NewAddressPubKeyHash(
+		bchutil.Hash160(privKey.PubKey().SerializeCompressed()),
+		&chaincfg.SimNetParams,
+	)
+	if err != nil {
+		t.Fatalf("unable to create address: %v", err)
+	}
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("unable to create script: %v", err)
+	}
+	payment, err := node.CreateTransaction(
+		[]*wire.TxOut{{Value: 100000000, PkScript: script}}, 10, true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create payment: %v", err)
+	}
+	if _, err := node.Node.SendRawTransaction(payment, true); err != nil {
+		t.Fatalf("unable to send payment: %v", err)
+	}
+	if _, err := node.Node.Generate(1); err != nil {
+		t.Fatalf("unable to mine payment: %v", err)
+	}
+	_, payHeight, err := node.Node.GetBestBlock()
+	if err != nil {
+		t.Fatalf("unable to get best block: %v", err)
+	}
+	if _, err := node.Node.Generate(10); err != nil {
+		t.Fatalf("unable to mine blocks: %v", err)
+	}
+	payTxid := payment.TxHash()
+
+	// The filter headers we'll make wrong start a few blocks below the
+	// payment.
+	divergence := payHeight - 5
+
+	dataDir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dataDir, "neutrino.db"), true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	svc := startChainService(t, dataDir, db, node)
+	waitForFilterHeaders(t, svc, node)
+	_ = svc.Stop()
+
+	tip := func() int32 {
+		t.Helper()
+
+		_, height, err := node.Node.GetBestBlock()
+		if err != nil {
+			t.Fatalf("unable to get best block: %v", err)
+		}
+		return height
+	}
+	assertNotBanned := func(svc *neutrino.ChainService) {
+		t.Helper()
+
+		if svc.IsBanned(node.P2PAddress()) {
+			t.Fatal("the node, which serves the right filter " +
+				"headers, was banned")
+		}
+	}
+
+	// A rescan goes past the payment with filters checked against wrong
+	// filter headers, which match nothing, so it misses the payment. The
+	// next block shows the filter headers are wrong, as the node's don't
+	// follow them, and once they're repaired, the rescan rewinds below the
+	// payment and finds it.
+	corruptFilterHeaders(t, dataDir, db, node, divergence, true)
+	svc = startChainService(t, dataDir, db, node)
+	rescan := startRecordingRescan(
+		svc, addr, &waddrmgr.BlockStamp{Height: divergence - 2},
+	)
+	rescan.waitForHeight(t, tip())
+	rescan.mtx.Lock()
+	missed := !rescan.found(payHeight, payTxid)
+	rescan.mtx.Unlock()
+	if !missed {
+		t.Fatal("expected the rescan to miss the payment with the " +
+			"wrong filters")
+	}
+
+	if _, err := node.Node.Generate(1); err != nil {
+		t.Fatalf("unable to mine block: %v", err)
+	}
+	rescan.waitForPayment(t, payHeight, payTxid)
+	waitForFilterHeaders(t, svc, node)
+	rescan.waitForHeight(t, tip())
+	if !rescan.rewoundPast(payHeight) {
+		t.Fatal("expected the rescan to rewind below the payment")
+	}
+	rescan.stop(t)
+	assertNotBanned(svc)
+	_ = svc.Stop()
+
+	// The filter headers are wrong again, and a block shows it before any
+	// rescan starts. A rescan that starts from the tip once they're
+	// repaired, as a wallet's does from where it got to with the wrong
+	// filters, rewinds below where it started and finds the payment.
+	corruptFilterHeaders(t, dataDir, db, node, divergence, true)
+	svc = startChainService(t, dataDir, db, node)
+	if _, err := node.Node.Generate(1); err != nil {
+		t.Fatalf("unable to mine block: %v", err)
+	}
+	waitForFilterHeaders(t, svc, node)
+	best, err := svc.BestBlock()
+	if err != nil {
+		t.Fatalf("unable to get best block: %v", err)
+	}
+	rescan = startRecordingRescan(svc, addr, best)
+	rescan.waitForPayment(t, payHeight, payTxid)
+	rescan.waitForHeight(t, best.Height)
+	if !rescan.rewoundPast(payHeight) {
+		t.Fatal("expected the rescan to rewind below the payment")
+	}
+	rescan.stop(t)
+	assertNotBanned(svc)
+	_ = svc.Stop()
+
+	// The filter headers are wrong again, but without filters stored for
+	// them, so a rescan from below them can't fetch filters that match
+	// them, which shows they're wrong. Once they're repaired, the rescan
+	// finds the payment.
+	corruptFilterHeaders(t, dataDir, db, node, divergence, false)
+	svc = startChainService(t, dataDir, db, node)
+	rescan = startRecordingRescan(
+		svc, addr, &waddrmgr.BlockStamp{Height: divergence - 2},
+	)
+	rescan.waitForPayment(t, payHeight, payTxid)
+	waitForFilterHeaders(t, svc, node)
+	rescan.waitForHeight(t, tip())
+	rescan.stop(t)
+	assertNotBanned(svc)
+	_ = svc.Stop()
 }
