@@ -1470,7 +1470,9 @@ func TestTxRequestsRetried(t *testing.T) {
 
 // TestRollBackToHeightDisconnectedHeights checks that rolling back several
 // blocks sends a disconnected notification for each block with that block's
-// own height and the header that becomes the new tip.
+// own height and the header that becomes the new tip, and that the block
+// manager's tip of the filter headers follows the filter headers back, so that
+// a new block subscriber isn't handed blocks above it.
 func TestRollBackToHeightDisconnectedHeights(t *testing.T) {
 	t.Parallel()
 
@@ -1522,6 +1524,8 @@ func TestRollBackToHeightDisconnectedHeights(t *testing.T) {
 	if err := cfStore.WriteHeaders(filterHeaders...); err != nil {
 		t.Fatalf("unable to write filter headers: %v", err)
 	}
+	bm.filterHeaderTip = tipHeight
+	bm.filterHeaderTipHash = chain[tipHeight].BlockHash()
 
 	// The notification channel is unbuffered, so roll back in the
 	// background and read the notifications here.
@@ -1588,6 +1592,23 @@ func TestRollBackToHeightDisconnectedHeights(t *testing.T) {
 	if height != rollBackTo {
 		t.Fatalf("filter header tip at height %d, expected %d", height,
 			rollBackTo)
+	}
+	if bm.filterHeaderTip != rollBackTo ||
+		bm.filterHeaderTipHash != chain[rollBackTo].BlockHash() {
+
+		t.Fatalf("the block manager's filter header tip is %v at "+
+			"height %d, expected %v at height %d",
+			bm.filterHeaderTipHash, bm.filterHeaderTip,
+			chain[rollBackTo].BlockHash(), rollBackTo)
+	}
+	backlog, bestHeight, err := bm.NotificationsSinceHeight(rollBackTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backlog) != 0 || bestHeight != rollBackTo {
+		t.Fatalf("a block subscriber at height %d is handed %d blocks "+
+			"up to height %d, expected none", rollBackTo,
+			len(backlog), bestHeight)
 	}
 }
 

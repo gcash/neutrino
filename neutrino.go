@@ -1105,6 +1105,13 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 				return nil, err
 			}
 			regHeight = uint32(newFilterTip.Height)
+
+			// The block manager keeps the tip of the filter headers
+			// too, which would otherwise stay at the block rolled
+			// back until filter headers are written again, and new
+			// block subscribers would be handed the blocks up to
+			// its height, whose filter headers we don't have.
+			s.blockManager.setFilterHeaderTip(regHeight, *newTip)
 		}
 
 		bs, err = s.BlockHeaders.RollbackLastBlock()

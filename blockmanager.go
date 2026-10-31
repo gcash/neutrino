@@ -3684,16 +3684,22 @@ func (b *blockManager) rollBackFilterHeaders(height uint32) error {
 	if _, err := store.RollbackToHeight(height, &newTipHash); err != nil {
 		return err
 	}
-
-	b.newFilterHeadersMtx.Lock()
-	b.filterHeaderTip = height
-	b.filterHeaderTipHash = newTipHash
-	b.newFilterHeadersMtx.Unlock()
-	b.newFilterHeadersSignal.Broadcast()
+	b.setFilterHeaderTip(height, newTipHash)
 
 	b.notifyFilterHeaderRollback(height)
 
 	return nil
+}
+
+// setFilterHeaderTip sets the tip of the filter headers that we keep to the
+// block at the given height with the given hash, once the filter headers were
+// rolled back to it.
+func (b *blockManager) setFilterHeaderTip(height uint32, hash chainhash.Hash) {
+	b.newFilterHeadersMtx.Lock()
+	b.filterHeaderTip = height
+	b.filterHeaderTipHash = hash
+	b.newFilterHeadersMtx.Unlock()
+	b.newFilterHeadersSignal.Broadcast()
 }
 
 // NotificationsSinceHeight returns a backlog of block notifications starting
