@@ -4,6 +4,7 @@
 package neutrino
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -23,8 +24,6 @@ import (
 	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
 	"github.com/gcash/neutrino/banman"
@@ -176,6 +175,11 @@ type ServerPeer struct {
 	//nolint:unused // retained for future use.
 	banScore connmgr.DynamicBanScore
 	quit     chan struct{}
+
+	// mempoolScore mirrors the ban score that the peer keeps for us, for
+	// our requests for its mempool, so that we never ask it once more
+	// than its score lets us without being banned.
+	mempoolScore connmgr.DynamicBanScore
 
 	// The following map of subcribers is used to subscribe to messages
 	// from the peer. This allows broadcast to multiple subscribers at
@@ -649,6 +653,10 @@ type ChainService struct {
 
 	mempool *Mempool
 
+	// mempoolRequests asks our peers for the transactions in their
+	// mempools that RequestMempoolFilter asks for.
+	mempoolRequests *mempoolRequester
+
 	proxy string
 
 	broadcastTimeout time.Duration
@@ -818,6 +826,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		})
 	}
 
+	s.mempoolRequests = newMempoolRequester(s.Peers, func() bool {
+		return s.blockManager.BlockHeadersSynced()
+	}, s.quit)
+
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
 		BestSnapshot: s.BestBlock,
 		GetBlockHash: s.GetBlockHash,
@@ -984,92 +996,42 @@ func (s *ChainService) NotifyMempoolReceived(addrs []bchutil.Address) {
 	s.mempool.NotifyReceived(addrs)
 }
 
-// RequestMempoolFilter requests the mempool filter from a single peer that
-// advertises bloom filter support.
-func (s *ChainService) RequestMempoolFilter(addrs []bchutil.Address) {
-	go s.requestMempoolFilter(addrs)
-}
+// RequestMempoolFilter asks our peers for the transactions in their mempools
+// that pay one of addrs or spend one of outPoints, such as those sent while we
+// were stopped, which then reach the callbacks of the mempool as announced
+// transactions do.  It asks once the block headers are synced, and again for
+// everything asked for so far when we regain peers after having none, or when
+// the process was suspended, as transactions sent meanwhile weren't announced
+// to us.  It returns at once, and does nothing in blocks only mode.
+func (s *ChainService) RequestMempoolFilter(addrs []bchutil.Address,
+	outPoints []wire.OutPoint) {
 
-func (s *ChainService) requestMempoolFilter(addrs []bchutil.Address) {
-	// We'll just start with our first peer and if that one fails
-	// move on to the next one. Since the mempool filter is not
-	// authenticated against a block, the remote peer could lie
-	// to us and omit transactions but we're treatign this function
-	// as best effort anyway. Worst case scenario we either download
-	// the mempool unnecessarily or have to wait for confirmation to
-	// detect our transaction.
-	for _, peer := range s.Peers() {
-		if peer == nil || !peer.Connected() {
-			continue
-		}
-
-		// A match is followed by a mempool message, which only peers
-		// with bloom filter support serve. bchd disconnects a peer that
-		// sends it one while running without bloom filters.
-		if peer.Services()&wire.SFNodeBloom != wire.SFNodeBloom {
-			continue
-		}
-
-		msgChan := make(chan spMsg)
-		subQuit := make(chan struct{})
-		subscription := spMsgSubscription{
-			msgChan:  msgChan,
-			quitChan: subQuit,
-		}
-		defer close(subQuit)
-
-		// Subscribe to the response
-		peer.subscribeRecvMsg(subscription)
-		peer.QueueMessage(wire.NewMsgGetCFMempool(wire.GCSFilterRegular), nil)
-
-		timeout := time.After(QueryTimeout)
-	listenResponse:
-		for {
-			select {
-			case <-timeout:
-				peer.unsubscribeRecvMsgs(subscription)
-				break listenResponse
-			case msg := <-msgChan:
-				// We're only interested in CFilter messages
-				cfFilerMsg, ok := msg.msg.(*wire.MsgCFilter)
-				if !ok {
-					continue
-				}
-				peer.unsubscribeRecvMsgs(subscription)
-				gotFilter, err := gcs.FromNBytes(
-					builder.DefaultP, builder.DefaultM,
-					cfFilerMsg.Data,
-				)
-				if err != nil {
-					log.Debugf("Received invalid CFilter message from %s", peer.Addr())
-					break listenResponse
-				}
-				scripts := make([][]byte, 0)
-				for _, addr := range addrs {
-					script, err := txscript.PayToAddrScript(addr)
-					if err != nil {
-						log.Errorf("Error converting RequestMempoolFilter address to script: %s", err)
-						return
-					}
-					scripts = append(scripts, script)
-				}
-				key := builder.DeriveKey(&chainhash.Hash{})
-				matched, err := gotFilter.MatchAny(key, scripts)
-				if err != nil {
-					log.Errorf("Error match RequestMempoolFilter address against filter: %s", err)
-					break listenResponse
-				}
-				// If we matched anything send the mempool message. This will trigger the remote peer
-				// to send inv messages with the mempool transactions. The rest of our code should handle
-				// processing the invs.
-				if matched {
-					peer.QueueMessage(wire.NewMsgMemPool(), nil)
-					return
-				}
-			}
-		}
+	if s.blocksOnly {
+		return
 	}
-	log.Debug("Exhausted all connected peers attempting to send GetCFMempoolRequest")
+
+	// The filter of a mempool holds the scripts that its transactions pay
+	// and the outpoints that they spend.
+	entries := make([][]byte, 0, len(addrs)+len(outPoints))
+	for _, addr := range addrs {
+		script, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			log.Errorf("Unable to watch %v in the mempool: %v", addr,
+				err)
+			continue
+		}
+		entries = append(entries, script)
+	}
+	for i := range outPoints {
+		var buf bytes.Buffer
+		if err := outPoints[i].Serialize(&buf); err != nil {
+			log.Errorf("Unable to watch %v in the mempool: %v",
+				outPoints[i], err)
+			continue
+		}
+		entries = append(entries, buf.Bytes())
+	}
+	s.mempoolRequests.request(entries)
 }
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.
@@ -1316,8 +1278,13 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		return false
 	}
 
-	// Add the new peer and start it.
+	// Add the new peer and start it.  When it's our only one, we had lost
+	// all peers, and with them the transactions announced meanwhile, so
+	// we'll ask for the mempool again.
 	log.Debugf("New peer %s", sp)
+	if state.Count() == 0 && s.mempoolRequests != nil {
+		s.mempoolRequests.want()
+	}
 	state.outboundGroups[addrmgr.GroupKey(sp.NA())]++
 	if sp.persistent {
 		state.persistentPeers[sp.ID()] = sp
@@ -1640,6 +1607,12 @@ func (s *ChainService) Start() error {
 	// managers.
 	s.wg.Add(1)
 	go s.peerHandler()
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.mempoolRequests.run()
+	}()
 
 	return nil
 }

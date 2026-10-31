@@ -2542,13 +2542,13 @@ func (b *blockManager) QueueTx(tx *bchutil.Tx, sp *ServerPeer) {
 func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	invVects := imsg.inv.InvList
 	if b.BlockHeadersSynced() {
-		gdmsg := wire.NewMsgGetData()
+		wanted := make([]*wire.InvVect, 0, len(invVects))
 		for _, iv := range invVects {
 			if iv.Type == wire.InvTypeTx && b.wantTx(imsg.peer, iv.Hash) {
-				_ = gdmsg.AddInvVect(iv)
+				wanted = append(wanted, iv)
 			}
 		}
-		if len(gdmsg.InvList) > 0 {
+		for _, gdmsg := range txGetData(wanted) {
 			imsg.peer.QueueMessage(gdmsg, nil)
 		}
 	}
@@ -2723,6 +2723,31 @@ func (b *blockManager) handleTxMsg(tmsg *txMsg) {
 	}
 	b.server.mempool.AddTransaction(tmsg.tx)
 	delete(b.requestedTxns, *txHash)
+}
+
+// maxGetDataTxs is the most transactions we ask a peer for in one getdata
+// message.  bchd adds the number of items times 99 / 50,000, rounded down, to
+// a peer's ban score for a getdata message, which is nothing for this many, and
+// the reply to a mempool message can announce a whole mempool at once.
+const maxGetDataTxs = 505
+
+// txGetData returns the getdata messages that ask for the transactions of
+// invVects, at most maxGetDataTxs to a message.
+func txGetData(invVects []*wire.InvVect) []*wire.MsgGetData {
+	var msgs []*wire.MsgGetData
+	for len(invVects) > 0 {
+		n := len(invVects)
+		if n > maxGetDataTxs {
+			n = maxGetDataTxs
+		}
+		gdmsg := wire.NewMsgGetDataSizeHint(uint(n))
+		for _, iv := range invVects[:n] {
+			_ = gdmsg.AddInvVect(iv)
+		}
+		msgs = append(msgs, gdmsg)
+		invVects = invVects[n:]
+	}
+	return msgs
 }
 
 // QueueHeaders adds the passed headers message and peer to the block handling

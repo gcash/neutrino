@@ -4,21 +4,15 @@ import (
 	"errors"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gcash/bchd/addrmgr"
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg"
-	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/peer"
-	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
-	"github.com/gcash/bchutil"
-	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/neutrino/banman"
 )
 
@@ -191,10 +185,12 @@ func newPeerTestService(t *testing.T) (*ChainService, *recordedBans) {
 }
 
 // connectTestPeer connects an outbound peer of s to a remote peer on the
-// loopback interface that advertises services and uses listeners, and returns
-// it once the version handshake is done.
+// loopback interface that advertises services and uses listeners, with the
+// changes of configure to its config, and returns it once the version
+// handshake is done.
 func connectTestPeer(t *testing.T, s *ChainService, services wire.ServiceFlag,
-	listeners peer.MessageListeners) *ServerPeer {
+	listeners peer.MessageListeners,
+	configure ...func(*peer.Config)) *ServerPeer {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -206,12 +202,16 @@ func connectTestPeer(t *testing.T, s *ChainService, services wire.ServiceFlag,
 		if err != nil {
 			return
 		}
-		remote := peer.NewInboundPeer(&peer.Config{
+		cfg := &peer.Config{
 			ChainParams:            &s.chainParams,
 			Services:               services,
 			Listeners:              listeners,
 			TstAllowSelfConnection: true,
-		})
+		}
+		for _, f := range configure {
+			f(cfg)
+		}
+		remote := peer.NewInboundPeer(cfg)
 		remote.AssociateConnection(conn)
 	}()
 
@@ -279,108 +279,6 @@ func TestOnVersionServices(t *testing.T) {
 
 				t.Fatalf("bans %v, want 127.0.0.1/32 for %v",
 					got, banman.NoCompactFilters)
-			}
-		})
-	}
-}
-
-// TestRequestMempoolFilterServices checks that the mempool filter, and the
-// mempool message that follows a match, are only requested from peers that
-// advertise bloom filter support.
-func TestRequestMempoolFilterServices(t *testing.T) {
-	addr, err := bchutil.NewAddressPubKeyHash(
-		make([]byte, 20), &chaincfg.SimNetParams,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	script, err := txscript.PayToAddrScript(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	filter, err := gcs.BuildGCSFilter(
-		builder.DefaultP, builder.DefaultM,
-		builder.DeriveKey(&chainhash.Hash{}), [][]byte{script},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	filterBytes, err := filter.NBytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name     string
-		services wire.ServiceFlag
-		mempool  bool
-	}{
-		{"cf", wire.SFNodeNetwork | wire.SFNodeCF, false},
-		{"cf and bloom", wire.SFNodeNetwork | wire.SFNodeCF |
-			wire.SFNodeBloom, true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			s, _ := newPeerTestService(t)
-			var getCFMempool, mempool int32
-			ping := make(chan struct{}, 1)
-			sp := connectTestPeer(t, s, test.services,
-				peer.MessageListeners{
-					OnGetCFMempool: func(p *peer.Peer,
-						_ *wire.MsgGetCFMempool) {
-
-						atomic.AddInt32(&getCFMempool, 1)
-						p.QueueMessage(wire.NewMsgCFilter(
-							wire.GCSFilterRegular,
-							&chainhash.Hash{}, filterBytes,
-						), nil)
-					},
-					OnMemPool: func(*peer.Peer, *wire.MsgMemPool) {
-						atomic.AddInt32(&mempool, 1)
-					},
-					OnPing: func(*peer.Peer, *wire.MsgPing) {
-						select {
-						case ping <- struct{}{}:
-						default:
-						}
-					},
-				})
-
-			go func() {
-				for {
-					select {
-					case msg := <-s.query:
-						if m, ok := msg.(getPeersMsg); ok {
-							m.reply <- []*ServerPeer{sp}
-						}
-					case <-s.quit:
-						return
-					}
-				}
-			}()
-
-			s.requestMempoolFilter([]bchutil.Address{addr})
-
-			// Messages arrive in order, so once the ping is in, so is
-			// anything requestMempoolFilter sent.
-			sp.QueueMessage(wire.NewMsgPing(1), nil)
-			select {
-			case <-ping:
-			case <-time.After(10 * time.Second):
-				t.Fatal("ping timed out")
-			}
-
-			wantRequests := int32(0)
-			if test.mempool {
-				wantRequests = 1
-			}
-			if n := atomic.LoadInt32(&getCFMempool); n != wantRequests {
-				t.Fatalf("got %d getcfmempool messages, want %d",
-					n, wantRequests)
-			}
-			if n := atomic.LoadInt32(&mempool); n != wantRequests {
-				t.Fatalf("got %d mempool messages, want %d",
-					n, wantRequests)
 			}
 		})
 	}

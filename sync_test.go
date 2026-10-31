@@ -18,6 +18,7 @@ import (
 	"github.com/gcash/neutrino/banman"
 
 	"github.com/gcash/bchd/bchec"
+	"github.com/gcash/bchd/btcjson"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/integration/rpctest"
@@ -1889,4 +1890,75 @@ func TestFilterHeaderRepair(t *testing.T) {
 	rescan.stop(t)
 	assertNotBanned(svc)
 	_ = svc.Stop()
+}
+
+// TestMempoolRequest checks end to end that a ChainService that starts while
+// a payment to an address it watches waits in a node's mempool, which the node
+// doesn't announce to peers that connect later, asks the node for its mempool
+// once its block headers are synced, and reports the payment.
+func TestMempoolRequest(t *testing.T) {
+	node, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	if err != nil {
+		t.Fatalf("unable to create harness: %v", err)
+	}
+	defer func() { _ = node.TearDown() }()
+	if err := node.SetUp(true, 10); err != nil {
+		t.Fatalf("unable to set up harness: %v", err)
+	}
+
+	privKey, err := bchec.NewPrivateKey(bchec.S256())
+	if err != nil {
+		t.Fatalf("unable to generate key: %v", err)
+	}
+	addr, err := bchutil.NewAddressPubKeyHash(
+		bchutil.Hash160(privKey.PubKey().SerializeCompressed()),
+		&chaincfg.SimNetParams,
+	)
+	if err != nil {
+		t.Fatalf("unable to create address: %v", err)
+	}
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("unable to create script: %v", err)
+	}
+	payment, err := node.CreateTransaction(
+		[]*wire.TxOut{{Value: 100000000, PkScript: script}}, 10, true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create payment: %v", err)
+	}
+	if _, err := node.Node.SendRawTransaction(payment, true); err != nil {
+		t.Fatalf("unable to send payment: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dataDir, "neutrino.db"), true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	svc := startChainService(t, dataDir, db, node)
+	defer func() { _ = svc.Stop() }()
+	reported := make(chan *bchutil.Tx, 1)
+	svc.RegisterMempoolCallback(func(tx *bchutil.Tx, _ *btcjson.BlockDetails) {
+		select {
+		case reported <- tx:
+		default:
+		}
+	})
+	svc.NotifyMempoolReceived([]bchutil.Address{addr})
+	svc.RequestMempoolFilter([]bchutil.Address{addr}, nil)
+
+	select {
+	case tx := <-reported:
+		if *tx.Hash() != payment.TxHash() {
+			t.Fatalf("reported %v, want the payment %v", tx.Hash(),
+				payment.TxHash())
+		}
+	case <-time.After(repairTimeout):
+		t.Fatal("the payment in the node's mempool wasn't reported")
+	}
 }
