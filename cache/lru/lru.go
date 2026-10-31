@@ -158,6 +158,30 @@ func (c *Cache) Get(key interface{}) (cache.Value, error) {
 	return el.Value.(*entry).value, nil
 }
 
+// Delete removes the element with the given key, if the cache holds one, and
+// returns whether it did.
+func (c *Cache) Delete(key interface{}) (bool, error) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	el, ok := c.cache[key]
+	if !ok {
+		return false, nil
+	}
+
+	es, err := el.Value.(*entry).value.Size()
+	if err != nil {
+		return false, fmt.Errorf("couldn't determine size of cache "+
+			"value: %v", err)
+	}
+
+	c.ll.Remove(el)
+	delete(c.cache, key)
+	c.size -= es
+
+	return true, nil
+}
+
 // Len returns number of elements in the cache.
 func (c *Cache) Len() int {
 	c.mtx.RLock()

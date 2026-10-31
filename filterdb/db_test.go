@@ -126,3 +126,45 @@ func TestFilterStorage(t *testing.T) {
 		t.Fatalf("regular filter doesn't match!")
 	}
 }
+
+// TestFilterDeletion checks that DeleteFilters removes the stored filters it's
+// given, so that fetching them again reports ErrFilterNotFound, that it skips
+// filters the database doesn't hold, and that it leaves the others.
+func TestFilterDeletion(t *testing.T) {
+	cleanUp, database, err := createTestDatabase()
+	defer cleanUp()
+	if err != nil {
+		t.Fatalf("unable to create test db: %v", err)
+	}
+
+	hashes := []chainhash.Hash{{1}, {2}, {3}}
+	for i := range hashes {
+		filter, err := genRandFilter(10)
+		if err != nil {
+			t.Fatalf("unable to create random filter: %v", err)
+		}
+		err = database.PutFilter(&hashes[i], filter, RegularFilter)
+		if err != nil {
+			t.Fatalf("unable to store filter: %v", err)
+		}
+	}
+
+	missing := chainhash.Hash{4}
+	err = database.DeleteFilters(
+		[]*chainhash.Hash{&hashes[0], &missing, &hashes[2]},
+		RegularFilter,
+	)
+	if err != nil {
+		t.Fatalf("unable to delete filters: %v", err)
+	}
+	for _, hash := range []chainhash.Hash{hashes[0], hashes[2]} {
+		_, err = database.FetchFilter(&hash, RegularFilter)
+		if err != ErrFilterNotFound {
+			t.Fatalf("fetching deleted filter %v returned %v, "+
+				"want ErrFilterNotFound", hash, err)
+		}
+	}
+	if _, err := database.FetchFilter(&hashes[1], RegularFilter); err != nil {
+		t.Fatalf("the other filter is gone: %v", err)
+	}
+}

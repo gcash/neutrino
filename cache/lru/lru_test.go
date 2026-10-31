@@ -312,3 +312,42 @@ func TestConcurrencyBigCache(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestDelete checks that Delete removes an element and frees its size, so that
+// elements put afterwards fit without evicting others, and that deleting a key
+// the cache doesn't hold changes nothing.
+func TestDelete(t *testing.T) {
+	t.Parallel()
+	c := NewCache(3)
+	_, _ = c.Put(1, &sizeable{value: 1, size: 1})
+	_, _ = c.Put(2, &sizeable{value: 2, size: 2})
+
+	deleted, err := c.Delete(2)
+	if err != nil || !deleted {
+		t.Fatalf("Delete(2) = %v, %v, want true, nil", deleted, err)
+	}
+	assertEqual(t, c.Len(), 1, "")
+	if _, err := c.Get(2); err != cache.ErrElementNotFound {
+		t.Fatalf("Get(2) after Delete returned %v, want "+
+			"ErrElementNotFound", err)
+	}
+
+	// The deleted element's size is free again, so two more elements of
+	// size one fit next to the first without evicting it.
+	evicted, err := c.Put(3, &sizeable{value: 3, size: 1})
+	if err != nil || evicted {
+		t.Fatalf("Put(3) = %v, %v, want no eviction", evicted, err)
+	}
+	evicted, err = c.Put(4, &sizeable{value: 4, size: 1})
+	if err != nil || evicted {
+		t.Fatalf("Put(4) = %v, %v, want no eviction", evicted, err)
+	}
+	assertEqual(t, getSizeableValue(c.Get(1)), 1, "")
+
+	deleted, err = c.Delete(2)
+	if err != nil || deleted {
+		t.Fatalf("Delete of a missing key = %v, %v, want false, nil",
+			deleted, err)
+	}
+	assertEqual(t, c.Len(), 3, "")
+}

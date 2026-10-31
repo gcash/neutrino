@@ -636,3 +636,122 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 }
 
 // TODO(roasbeef): combined re-org scenarios
+
+// TestFilterHeaderStoreRollbackToHeight checks that RollbackToHeight drops the
+// filter headers above a height in one step, that filter headers can be written
+// from there again, and that the store opens again at the same tip.
+func TestFilterHeaderStoreRollbackToHeight(t *testing.T) {
+	t.Parallel()
+
+	cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
+	if cleanUp != nil {
+		defer cleanUp()
+	}
+	if err != nil {
+		t.Fatalf("unable to create new filter header store: %v", err)
+	}
+
+	// We simulate the expected behavior of the block headers being written
+	// to disk before the filter headers are.
+	const numHeaders = 20
+	filterHeaders := createTestFilterHeaderChain(numHeaders)
+	err = walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+
+		for _, header := range filterHeaders {
+			var heightBytes [4]byte
+			binary.BigEndian.PutUint32(heightBytes[:], header.Height)
+			err := rootBucket.Put(header.HeaderHash[:], heightBytes[:])
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unable to pre-load block index: %v", err)
+	}
+	if err := fhs.WriteHeaders(filterHeaders...); err != nil {
+		t.Fatalf("unable to write filter headers: %v", err)
+	}
+
+	assertTip := func(fhs *FilterHeaderStore, want FilterHeader) {
+		t.Helper()
+
+		tipHeader, tipHeight, err := fhs.ChainTip()
+		if err != nil {
+			t.Fatalf("unable to fetch chain tip: %v", err)
+		}
+		if tipHeight != want.Height || *tipHeader != want.FilterHash {
+			t.Fatalf("expected tip %v at height %d, got %v at "+
+				"height %d", want.FilterHash, want.Height,
+				tipHeader, tipHeight)
+		}
+	}
+
+	// We can only roll back below the tip.
+	last := filterHeaders[numHeaders-1]
+	for _, height := range []uint32{numHeaders, numHeaders + 1} {
+		_, err := fhs.RollbackToHeight(height, &last.HeaderHash)
+		if err == nil {
+			t.Fatalf("expected an error rolling back to height %d",
+				height)
+		}
+	}
+	assertTip(fhs, last)
+
+	// Rolling back to height 12 leaves it as the tip, and drops the filter
+	// headers above it.
+	newTip := filterHeaders[11]
+	stamp, err := fhs.RollbackToHeight(newTip.Height, &newTip.HeaderHash)
+	if err != nil {
+		t.Fatalf("unable to roll back: %v", err)
+	}
+	if uint32(stamp.Height) != newTip.Height ||
+		stamp.Hash != newTip.FilterHash {
+
+		t.Fatalf("expected stamp of %v at height %d, got %v",
+			newTip.FilterHash, newTip.Height, spew.Sdump(stamp))
+	}
+	assertTip(fhs, newTip)
+	if _, err := fhs.FetchHeaderByHeight(newTip.Height + 1); err == nil {
+		t.Fatalf("expected no filter header at height %d",
+			newTip.Height+1)
+	}
+
+	// Filter headers can be written from there again.
+	rewritten := filterHeaders[12:]
+	for i := range rewritten {
+		rewritten[i].FilterHash = sha256.Sum256(
+			[]byte{byte(rewritten[i].Height), 1},
+		)
+	}
+	if err := fhs.WriteHeaders(rewritten...); err != nil {
+		t.Fatalf("unable to write filter headers: %v", err)
+	}
+	assertTip(fhs, filterHeaders[numHeaders-1])
+	for _, header := range filterHeaders {
+		got, err := fhs.FetchHeaderByHeight(header.Height)
+		if err != nil {
+			t.Fatalf("unable to fetch filter header at height %d: "+
+				"%v", header.Height, err)
+		}
+		if *got != header.FilterHash {
+			t.Fatalf("expected filter header %v at height %d, got "+
+				"%v", header.FilterHash, header.Height, got)
+		}
+	}
+
+	// The store opens again at the same tip.
+	if err := fhs.Close(); err != nil {
+		t.Fatalf("unable to close the store: %v", err)
+	}
+	fhs, err = NewFilterHeaderStore(
+		tempDir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+	)
+	if err != nil {
+		t.Fatalf("unable to open the store again: %v", err)
+	}
+	assertTip(fhs, filterHeaders[numHeaders-1])
+}

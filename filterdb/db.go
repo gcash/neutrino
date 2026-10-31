@@ -51,6 +51,10 @@ type FilterDatabase interface {
 	// target block hash cannot be found, then ErrFilterNotFound is to be
 	// returned.
 	FetchFilter(*chainhash.Hash, FilterType) (*gcs.Filter, error)
+
+	// DeleteFilters removes the filters with the given hashes and type
+	// from persistent storage, those it holds, in a single transaction.
+	DeleteFilters([]*chainhash.Hash, FilterType) error
 }
 
 // FilterStore is an implementation of the FilterDatabase interface which is
@@ -154,6 +158,34 @@ func (f *FilterStore) PutFilter(hash *chainhash.Hash,
 		}
 
 		return targetBucket.Put(hash[:], bytes)
+	})
+}
+
+// DeleteFilters removes the filters with the given hashes and type from
+// persistent storage, those it holds, in a single transaction.
+//
+// NOTE: This method is a part of the FilterDatabase interface.
+func (f *FilterStore) DeleteFilters(hashes []*chainhash.Hash,
+	fType FilterType) error {
+
+	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
+		filters := tx.ReadWriteBucket(filterBucket)
+
+		var targetBucket walletdb.ReadWriteBucket
+		switch fType {
+		case RegularFilter:
+			targetBucket = filters.NestedReadWriteBucket(regBucket)
+		default:
+			return fmt.Errorf("unknown filter type: %v", fType)
+		}
+
+		for _, hash := range hashes {
+			if err := targetBucket.Delete(hash[:]); err != nil {
+				return err
+			}
+		}
+
+		return nil
 	})
 }
 

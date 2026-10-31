@@ -976,3 +976,47 @@ func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr
 		Hash:   *newHeaderTip,
 	}, nil
 }
+
+// RollbackToHeight rolls back both the index and the on-disk header file to the
+// filter header at the given height, which belongs to the block with the given
+// hash, in a single step rather than a filter header at a time. This method is
+// meant to be used when the filter headers above that height turn out to be
+// wrong while their blocks stay in the chain. The information about the latest
+// header tip after truncation is returned.
+func (f *FilterHeaderStore) RollbackToHeight(height uint32,
+	newTip *chainhash.Hash) (*waddrmgr.BlockStamp, error) {
+
+	// Lock store for write.
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+
+	_, chainTipHeight, err := f.chainTip()
+	if err != nil {
+		return nil, err
+	}
+	if height >= chainTipHeight {
+		return nil, fmt.Errorf("unable to roll back to height %d, "+
+			"which isn't below the tip at height %d", height,
+			chainTipHeight)
+	}
+
+	newHeaderTip, err := f.readHeader(height)
+	if err != nil {
+		return nil, err
+	}
+
+	// We'll move the index's tip first, as the header file is truncated to
+	// match it on startup should we fail to truncate it here. Each filter
+	// header takes 32 bytes, starting with the genesis block's.
+	if err := f.truncateIndex(newTip, false); err != nil {
+		return nil, err
+	}
+	if err := f.file.Truncate(int64(height+1) * 32); err != nil {
+		return nil, err
+	}
+
+	return &waddrmgr.BlockStamp{
+		Height: int32(height),
+		Hash:   *newHeaderTip,
+	}, nil
+}
