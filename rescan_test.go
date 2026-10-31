@@ -1611,8 +1611,151 @@ func TestWaitForRetryShutdown(t *testing.T) {
 	ro := &rescanOptions{quit: quit}
 	err := waitForRetry(
 		nil, ro, &waddrmgr.BlockStamp{}, &wire.BlockHeader{}, time.Hour,
+		nil, nil,
 	)
 	if !errors.Is(err, ErrRescanExit) {
 		t.Fatalf("expected rescan exit, got %v", err)
+	}
+}
+
+// awaitFilterQueried expects the filter of the block with the given hash to be
+// queried within timeout, and returns when it was.
+func (ctx *rescanTestContext) awaitFilterQueried(hash chainhash.Hash,
+	timeout time.Duration) time.Time {
+
+	ctx.t.Helper()
+
+	select {
+	case hashQueried := <-ctx.chain.filtersQueried:
+		if !hashQueried.IsEqual(&hash) {
+			ctx.t.Fatalf("expected to query filter %v, got %v",
+				hash, hashQueried)
+		}
+	case <-time.After(timeout):
+		ctx.t.Fatalf("expected rescan to query for filter %v", hash)
+	}
+	return time.Now()
+}
+
+// assertRetryBackoff expects the filter of the block with the given hash to be
+// queried the given number of times, each after waiting blockRetryInterval, and
+// then twice as long as before. The scheduler can delay when we read the clock
+// after a query, so a wait may come out a little shorter, but not as short as
+// the one before.
+func (ctx *rescanTestContext) assertRetryBackoff(hash chainhash.Hash,
+	tries int) {
+
+	ctx.t.Helper()
+
+	last := ctx.awaitFilterQueried(hash, 10*time.Second)
+	wait := blockRetryInterval
+	for try := 2; try <= tries; try++ {
+		queried := ctx.awaitFilterQueried(hash, 10*time.Second)
+		if waited := queried.Sub(last); waited < wait*3/4 {
+			ctx.t.Fatalf("try %d of filter %v came %v after the "+
+				"one before, want %v", try, hash, waited, wait)
+		}
+		last = queried
+		wait *= 2
+	}
+}
+
+// TestRescanRetryBackoff ensures that the rescan waits twice as long before
+// each try of a block whose filter it keeps failing to fetch, both while it
+// follows the chain and while it catches up with it, rather than asking for the
+// filter or block ten times a second, and goes on once it gets the filter.
+func TestRescanRetryBackoff(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	ctx.chain.setFailGetFilter(true)
+	block1 := ctx.chain.addNewBlock(true)
+	ctx.assertRetryBackoff(block1.Hash, 4)
+	ctx.chain.setFailGetFilter(false)
+	ctx.awaitFilterQueried(block1.Hash, 10*time.Second)
+	ctx.recvBlockConnected(block1)
+
+	// We'll add a block without notifying it and instead notify an invalid
+	// block, which should prompt the rescan to catch up with the chain
+	// manually.
+	ctx.chain.setFailGetFilter(true)
+	block2 := ctx.chain.addNewBlock(false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+	ctx.assertRetryBackoff(block2.Hash, 4)
+	ctx.chain.setFailGetFilter(false)
+	ctx.awaitFilterQueried(block2.Hash, 10*time.Second)
+	ctx.recvBlockConnected(block2)
+}
+
+// TestBlockRetryBackoff ensures that the wait before a block is tried again
+// doubles with each try of the same block up to maxBlockRetryInterval, and
+// starts over for another block, or once a block went through.
+func TestBlockRetryBackoff(t *testing.T) {
+	var backoff blockRetryBackoff
+	block1, block2 := chainhash.Hash{1}, chainhash.Hash{2}
+
+	want := blockRetryInterval
+	for try := 2; try <= 12; try++ {
+		if got := backoff.next(block1); got != want {
+			t.Fatalf("try %d: waited %v, want %v", try, got, want)
+		}
+		want *= 2
+		if want > maxBlockRetryInterval {
+			want = maxBlockRetryInterval
+		}
+	}
+
+	if got := backoff.next(block2); got != blockRetryInterval {
+		t.Fatalf("another block waited %v, want %v", got,
+			blockRetryInterval)
+	}
+	backoff.next(block2)
+	backoff.reset()
+	if got := backoff.next(block2); got != blockRetryInterval {
+		t.Fatalf("after a block went through, waited %v, want %v",
+			got, blockRetryInterval)
+	}
+}
+
+// TestWaitForRetryRollback ensures that a rollback of the filter headers ends a
+// retry wait at once and rewinds the rescan, so that a long wait doesn't hold
+// up scanning the blocks again.
+func TestWaitForRetryRollback(t *testing.T) {
+	rollbacks := make(chan uint32, 1)
+	rollbacks <- 5
+
+	var rewound []uint32
+	rewindTo := func(height uint32) (bool, error) {
+		rewound = append(rewound, height)
+		return true, nil
+	}
+
+	ro := &rescanOptions{quit: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- waitForRetry(
+			nil, ro, &waddrmgr.BlockStamp{}, &wire.BlockHeader{},
+			time.Hour, rollbacks, rewindTo,
+		)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rollback didn't end the wait")
+	}
+	if len(rewound) != 1 || rewound[0] != 5 {
+		t.Fatalf("rewound to %v, want to block 5", rewound)
 	}
 }

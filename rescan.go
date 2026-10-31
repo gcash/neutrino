@@ -271,6 +271,51 @@ func (q *blockRetryQueue) clear() {
 	q.blocks = nil
 }
 
+const (
+	// blockRetryInterval is how long we'll wait before we try again a
+	// block whose filter or block we couldn't fetch, the first time, and
+	// how often we'll check whether the filter headers have caught up with
+	// us when they're behind.
+	blockRetryInterval = 100 * time.Millisecond
+
+	// maxBlockRetryInterval is the longest we'll wait before we try a
+	// block again.
+	maxBlockRetryInterval = 30 * time.Second
+)
+
+// blockRetryBackoff is how long a rescan waits before it tries again a block
+// whose filter or block it couldn't fetch or check: blockRetryInterval at
+// first, and twice as long after each failed try of the same block, up to
+// maxBlockRetryInterval. A block that keeps failing, as one that doesn't match
+// its filter header does until the filter headers are repaired, would
+// otherwise be fetched again ten times a second.
+type blockRetryBackoff struct {
+	hash  chainhash.Hash
+	delay time.Duration
+}
+
+// next returns how long to wait before trying the block with hash again.
+func (b *blockRetryBackoff) next(hash chainhash.Hash) time.Duration {
+	switch {
+	case hash != b.hash || b.delay == 0:
+		b.hash = hash
+		b.delay = blockRetryInterval
+
+	case b.delay < maxBlockRetryInterval:
+		b.delay *= 2
+		if b.delay > maxBlockRetryInterval {
+			b.delay = maxBlockRetryInterval
+		}
+	}
+	return b.delay
+}
+
+// reset has the next block that fails wait blockRetryInterval, as a block went
+// through.
+func (b *blockRetryBackoff) reset() {
+	b.delay = 0
+}
+
 // updateChan specifies an update channel. This is for internal use by the
 // Rescan.Update functionality.
 func updateChan(update <-chan *updateOptions) RescanOption {
@@ -506,12 +551,8 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 
 	var (
 		blockRetrySignal <-chan time.Time
-		// blockRetryInterval is the interval in which we'll continually
-		// retry to fetch the latest filter from our peers.
-		//
-		// TODO(roasbeef): add exponential back-off
-		blockRetryInterval = time.Millisecond * 100
-		blockRetryQueue    = newBlockRetryQueue()
+		blockRetry       blockRetryBackoff
+		blockRetryQueue  = newBlockRetryQueue()
 	)
 
 	// handleBlockConnected is a closure that handles a new block connected
@@ -799,12 +840,14 @@ rescanLoop:
 					// as we couldn't fetch its filter or
 					// the block itself.
 					case errors.Is(err, errRetryBlock):
-						log.Debugf("Retrying %v after %v: %v",
-							ntfn, blockRetryInterval, err)
-						blockRetryQueue.push(ntfn)
-						blockRetrySignal = time.After(
-							blockRetryInterval,
+						header := ntfn.Header()
+						delay := blockRetry.next(
+							header.BlockHash(),
 						)
+						log.Debugf("Retrying %v after %v: %v",
+							ntfn, delay, err)
+						blockRetryQueue.push(ntfn)
+						blockRetrySignal = time.After(delay)
 
 					// Since we weren't able to successfully
 					// process the block, we'll set
@@ -860,6 +903,7 @@ rescanLoop:
 					// our queue and move on to the next.
 					case err == nil:
 						_ = blockRetryQueue.pop()
+						blockRetry.reset()
 						continue retryLoop
 
 					case errors.Is(err, ErrShuttingDown):
@@ -869,12 +913,14 @@ rescanLoop:
 					// as we couldn't fetch its filter or
 					// the block itself.
 					case errors.Is(err, errRetryBlock):
-						log.Debugf("Retrying %v after "+
-							"%v: %v", retryBlock,
-							blockRetryInterval, err)
-						blockRetrySignal = time.After(
-							blockRetryInterval,
+						header := retryBlock.Header()
+						delay := blockRetry.next(
+							header.BlockHash(),
 						)
+						log.Debugf("Retrying %v after "+
+							"%v: %v", retryBlock, delay,
+							err)
+						blockRetrySignal = time.After(delay)
 						continue rescanLoop
 
 					// Since we weren't able to successfully
@@ -947,7 +993,8 @@ rescanLoop:
 				if filterHeadersBehind() {
 					err := waitForRetry(
 						chain, ro, &curStamp, &curHeader,
-						blockRetryInterval,
+						blockRetryInterval, filterRollbacks,
+						rewindTo,
 					)
 					if err != nil {
 						return err
@@ -1010,23 +1057,26 @@ rescanLoop:
 			err = notifyBlock(chain, ro, curHeader, curStamp, scanning)
 			switch {
 			case err == nil:
+				blockRetry.reset()
 
 			// We couldn't fetch the block's filter or the block
 			// itself from the network. This is usually transient,
 			// as when we have no peers or they didn't respond, so
 			// rather than ending the rescan for good we'll rewind
-			// our state and retry the block after a short delay.
+			// our state and retry the block after a delay, which
+			// grows while the block keeps failing.
 			case errors.Is(err, errRetryBlock):
+				delay := blockRetry.next(curStamp.Hash)
 				log.Errorf("Unable to process block %d (%s), "+
 					"retrying after %v: %v", curStamp.Height,
-					curStamp.Hash, blockRetryInterval, err)
+					curStamp.Hash, delay, err)
 
 				curHeader = prevHeader
 				curStamp = prevStamp
 
 				err := waitForRetry(
-					chain, ro, &curStamp, &curHeader,
-					blockRetryInterval,
+					chain, ro, &curStamp, &curHeader, delay,
+					filterRollbacks, rewindTo,
 				)
 				if err != nil {
 					return err
@@ -1043,10 +1093,13 @@ rescanLoop:
 // progress while catching up with the chain, as when we're unable to fetch a
 // block or the filter headers are behind us. Filter updates received in the
 // meantime are applied right away, so that callers of Update aren't blocked
-// while we wait, in which case the wait is cut short.
+// while we wait, and a rollback of the filter headers rewinds us with rewindTo
+// right away, so that a long wait doesn't hold up scanning the blocks again;
+// either cuts the wait short.
 func waitForRetry(chain ChainSource, ro *rescanOptions,
 	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader,
-	interval time.Duration) error {
+	interval time.Duration, filterRollbacks <-chan uint32,
+	rewindTo func(uint32) (bool, error)) error {
 
 	select {
 	case <-ro.quit:
@@ -1054,6 +1107,10 @@ func waitForRetry(chain ChainSource, ro *rescanOptions,
 
 	case update := <-ro.update:
 		_, err := ro.updateFilter(chain, update, curStamp, curHeader)
+		return err
+
+	case height := <-filterRollbacks:
+		_, err := rewindTo(height)
 		return err
 
 	case <-time.After(interval):
