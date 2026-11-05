@@ -1892,6 +1892,89 @@ func TestFilterHeaderRepair(t *testing.T) {
 	_ = svc.Stop()
 }
 
+// TestSearchSpends checks end to end that a ChainService finds a spend against
+// a real node's blocks and filters, scanning up and down, from any height.
+func TestSearchSpends(t *testing.T) {
+	node, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	if err != nil {
+		t.Fatalf("unable to create harness: %v", err)
+	}
+	defer func() { _ = node.TearDown() }()
+	if err := node.SetUp(true, 10); err != nil {
+		t.Fatalf("unable to set up harness: %v", err)
+	}
+
+	script := []byte{txscript.OP_TRUE}
+	payment, err := node.CreateTransaction(
+		[]*wire.TxOut{{Value: 100000000, PkScript: script}}, 10, true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create payment: %v", err)
+	}
+	if _, err := node.Node.SendRawTransaction(payment, true); err != nil {
+		t.Fatalf("unable to send payment: %v", err)
+	}
+	hashes, err := node.Node.Generate(1)
+	if err != nil {
+		t.Fatalf("unable to mine: %v", err)
+	}
+	_, spendHeight, err := node.Node.GetBestBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.Node.Generate(5); err != nil {
+		t.Fatalf("unable to mine: %v", err)
+	}
+	_, tip, err := node.Node.GetBestBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dataDir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dataDir, "neutrino.db"), true,
+	)
+	if err != nil {
+		t.Fatalf("unable to create db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	svc := startChainService(t, dataDir, db, node)
+	defer func() { _ = svc.Stop() }()
+	waitForFilterHeaders(t, svc, node)
+
+	outpoint := payment.TxIn[0].PreviousOutPoint
+	for _, r := range [][2]int32{{1, tip}, {tip, 1}, {spendHeight, tip}, {tip, spendHeight}} {
+		var spends []neutrino.FoundSpend
+		reached, err := svc.SearchSpends([]wire.OutPoint{outpoint}, r[0], r[1],
+			func(spend neutrino.FoundSpend) []wire.OutPoint {
+				spends = append(spends, spend)
+				return nil
+			}, nil, nil)
+		if err != nil {
+			t.Fatalf("searching %v: %v", r, err)
+		}
+		if len(spends) != 1 || reached != spendHeight {
+			t.Fatalf("searching %v: found %+v, reached %d", r, spends, reached)
+		}
+		spend := spends[0]
+		if spend.SpendingTx.TxHash() != payment.TxHash() || spend.Height != spendHeight ||
+			spend.BlockHash != *hashes[0] {
+
+			t.Fatalf("searching %v: found %+v", r, spend)
+		}
+	}
+
+	// Past the spend, it's unspent for the range.
+	reached, err := svc.SearchSpends([]wire.OutPoint{outpoint}, spendHeight+1, tip,
+		func(spend neutrino.FoundSpend) []wire.OutPoint {
+			t.Errorf("found %+v", spend)
+			return nil
+		}, nil, nil)
+	if err != nil || reached != tip {
+		t.Fatalf("reached %d, %v", reached, err)
+	}
+}
+
 // TestMempoolRequest checks end to end that a ChainService that starts while
 // a payment to an address it watches waits in a node's mempool, which the node
 // doesn't announce to peers that connect later, asks the node for its mempool
