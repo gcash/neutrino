@@ -20,6 +20,9 @@ type mempoolTestPeer struct {
 	getFilter  int32
 	getMempool int32
 	ping       chan struct{}
+
+	// silent makes the peer leave the requests for its filter unanswered.
+	silent atomic.Bool
 }
 
 // connectMempoolPeer connects a peer of s that advertises services, runs the
@@ -45,6 +48,9 @@ func connectMempoolPeer(t *testing.T, s *ChainService,
 	p.sp = connectTestPeer(t, s, services, peer.MessageListeners{
 		OnGetCFMempool: func(remote *peer.Peer, _ *wire.MsgGetCFMempool) {
 			atomic.AddInt32(&p.getFilter, 1)
+			if p.silent.Load() {
+				return
+			}
 			if drop {
 				remote.Disconnect()
 				return
@@ -330,6 +336,105 @@ func TestMempoolRequestDropped(t *testing.T) {
 	}
 	if !r.wantsMempool() {
 		t.Fatal("dropped the request")
+	}
+}
+
+// TestMempoolRequestStalled checks that a peer that doesn't answer a request
+// sits out for mempoolStallTime rather than being asked on every attempt, that
+// the request goes to another peer meanwhile, and that it's asked again after.
+func TestMempoolRequestStalled(t *testing.T) {
+	script, _ := testMempoolEntries(t)
+	s, _ := newPeerTestService(t)
+	services := wire.SFNodeCF | wire.SFNodeBloom
+	stalled := connectMempoolPeer(t, s, services, "0.22.5",
+		[][]byte{script}, false)
+	stalled.silent.Store(true)
+	var synced atomic.Bool
+	synced.Store(true)
+	r := newTestMempoolRequester(t, &synced, stalled)
+	r.timeout = 100 * time.Millisecond
+	start := time.Now()
+	var elapsed atomic.Int64
+	r.now = func() time.Time {
+		return start.Add(time.Duration(elapsed.Load()))
+	}
+
+	r.request([][]byte{script})
+	r.attempt()
+	if getFilter, _ := stalled.requests(t); getFilter != 1 {
+		t.Fatalf("asked the peer %d times, want once", getFilter)
+	}
+	if !r.wantsMempool() {
+		t.Fatal("dropped the request")
+	}
+
+	r.attempt()
+	if getFilter, _ := stalled.requests(t); getFilter != 1 {
+		t.Fatal("asked a peer that is sitting out")
+	}
+
+	elapsed.Store(int64(mempoolStallTime))
+	stalled.silent.Store(false)
+	r.attempt()
+	if getFilter, getMempool := stalled.requests(t); getFilter != 2 ||
+		getMempool != 1 {
+
+		t.Fatalf("asked for the filter %d times and the mempool %d, "+
+			"want twice and once", getFilter, getMempool)
+	}
+	if r.wantsMempool() {
+		t.Fatal("the answered request is still wanted")
+	}
+}
+
+// TestMempoolRequestStalledForgotten checks that a peer that didn't answer is
+// forgotten once its time sitting out ends, even if it disconnected, which
+// keeps it from being asked and so from being looked at again.
+func TestMempoolRequestStalledForgotten(t *testing.T) {
+	var synced atomic.Bool
+	r := newTestMempoolRequester(t, &synced)
+	start := time.Now()
+	var elapsed atomic.Int64
+	r.now = func() time.Time {
+		return start.Add(time.Duration(elapsed.Load()))
+	}
+	gone := &ServerPeer{}
+	r.stalled[gone] = start.Add(mempoolStallTime)
+
+	r.candidates()
+	if !r.stalledNow(gone) {
+		t.Fatal("forgot a peer that is sitting out")
+	}
+	elapsed.Store(int64(mempoolStallTime))
+	r.candidates()
+	if r.stalledNow(gone) {
+		t.Fatal("kept a disconnected peer whose time sitting out ended")
+	}
+}
+
+// TestMempoolRequestStalledFallsBack checks that the request goes to another
+// peer when one doesn't answer.
+func TestMempoolRequestStalledFallsBack(t *testing.T) {
+	script, _ := testMempoolEntries(t)
+	s, _ := newPeerTestService(t)
+	services := wire.SFNodeCF | wire.SFNodeBloom
+	stalled := connectMempoolPeer(t, s, services, "0.22.5",
+		[][]byte{script}, false)
+	stalled.silent.Store(true)
+	other := connectMempoolPeer(t, s, services, "0.22.5",
+		[][]byte{script}, false)
+	var synced atomic.Bool
+	synced.Store(true)
+	r := newTestMempoolRequester(t, &synced, stalled, other)
+	r.timeout = 100 * time.Millisecond
+
+	r.request([][]byte{script})
+	r.attempt()
+	if getFilter, getMempool := other.requests(t); getFilter != 1 ||
+		getMempool != 1 {
+
+		t.Fatalf("asked the other peer for the filter %d times and the "+
+			"mempool %d, want once each", getFilter, getMempool)
 	}
 }
 

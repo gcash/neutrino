@@ -39,6 +39,11 @@ const (
 	// it must disconnect for us to take it that it banned us, as a peer
 	// whose ban threshold is lower than bchd's default would.
 	mempoolDropWindow = 5 * time.Second
+
+	// mempoolStallTime is how long a peer that didn't send the filter of
+	// its mempool in time sits out, as asking it again each time would
+	// wait out the timeout each time and raise its ban score for us.
+	mempoolStallTime = 10 * time.Minute
 )
 
 // mempoolRequester asks a peer for the transactions in its mempool that pay a
@@ -71,12 +76,14 @@ type mempoolRequester struct {
 	// them.  wanted is set while a request is wanted, and wants counts the
 	// times it was set, so that a request that comes while the peers are
 	// asked isn't taken as answered.  dropped holds the hosts of the peers
-	// that disconnected right after a request.
+	// that disconnected right after a request, and stalled when each peer
+	// that didn't answer one can be asked again.
 	mtx     sync.Mutex
 	entries map[string]struct{}
 	wanted  bool
 	wants   uint64
 	dropped map[string]struct{}
+	stalled map[*ServerPeer]time.Time
 }
 
 // newMempoolRequester returns a requester that asks the peers that peers
@@ -94,6 +101,7 @@ func newMempoolRequester(peers func() []*ServerPeer, synced func() bool,
 		wake:       make(chan struct{}, 1),
 		entries:    make(map[string]struct{}),
 		dropped:    make(map[string]struct{}),
+		stalled:    make(map[*ServerPeer]time.Time),
 	}
 }
 
@@ -179,8 +187,9 @@ func (r *mempoolRequester) attempt() {
 }
 
 // candidates returns the connected peers that serve the filter of their
-// mempool and their mempool, didn't disconnect right after a request, and can
-// take a request without their ban score for us passing maxMempoolBanScore,
+// mempool and their mempool, didn't disconnect right after a request, aren't
+// sitting out after one they didn't answer, and can take a request without
+// their ban score for us passing maxMempoolBanScore,
 // those with the lowest score first.
 func (r *mempoolRequester) candidates() []*ServerPeer {
 	type candidate struct {
@@ -188,8 +197,9 @@ func (r *mempoolRequester) candidates() []*ServerPeer {
 		score uint32
 	}
 	var candidates []candidate
+	r.sweepStalled()
 	for _, sp := range r.peers() {
-		if sp == nil || !sp.Connected() || r.droppedUs(sp) {
+		if sp == nil || !sp.Connected() || r.droppedUs(sp) || r.stalledNow(sp) {
 			continue
 		}
 		services := wire.SFNodeCF | wire.SFNodeBloom
@@ -266,6 +276,11 @@ func (r *mempoolRequester) ask(sp *ServerPeer, entries [][]byte) bool {
 			return true
 
 		case <-timeout:
+			log.Debugf("Peer %v didn't send the filter of its mempool "+
+				"in time, so it sits out for %v", sp, mempoolStallTime)
+			r.mtx.Lock()
+			r.stalled[sp] = r.now().Add(mempoolStallTime)
+			r.mtx.Unlock()
 			return false
 
 		case <-r.quit:
@@ -312,6 +327,28 @@ func (r *mempoolRequester) droppedUs(sp *ServerPeer) bool {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	_, ok := r.dropped[peerHost(sp)]
+	return ok
+}
+
+// sweepStalled forgets the peers whose time sitting out ended, those that
+// disconnected too, which are never asked again.
+func (r *mempoolRequester) sweepStalled() {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	now := r.now()
+	for sp, until := range r.stalled {
+		if !now.Before(until) {
+			delete(r.stalled, sp)
+		}
+	}
+}
+
+// stalledNow returns whether sp is sitting out after a request it didn't
+// answer.
+func (r *mempoolRequester) stalledNow(sp *ServerPeer) bool {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	_, ok := r.stalled[sp]
 	return ok
 }
 
