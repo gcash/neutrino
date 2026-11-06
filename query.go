@@ -79,6 +79,9 @@ var _ QueryAccess = (*ChainService)(nil)
 // much it keeps sending.
 const maxPeerQueryTimeouts = 10
 
+// cfilterLockPoll is how often a query that can give up tries the filter lock.
+const cfilterLockPoll = 50 * time.Millisecond
+
 // queries are a set of options that can be modified per-query, unlike global
 // options.
 //
@@ -798,12 +801,11 @@ func queryChainServicePeers(
 	peerTimeout := time.NewTimer(qo.timeout)
 	connectionTimeout := time.NewTimer(qo.peerConnectTimeout)
 
-	// peerDeadline bounds a peer's turn, as any message it sends resets
-	// peerTimeout, whether or not it answers the query, and one that keeps
-	// sending others would otherwise keep the query forever.
-	peerDeadline := time.NewTimer(qo.timeout * maxPeerQueryTimeouts)
-	defer peerDeadline.Stop()
-	turnOver := false
+	// A peer's turn is bounded, as any message it sends resets peerTimeout,
+	// whether or not it answers the query, and one that keeps sending
+	// others would otherwise keep the query forever.
+	turn := newPeerTurn(peerTimeout, qo.timeout)
+	defer turn.stop()
 	connectionTicker := connectionTimeout.C
 	if queryPeer != nil {
 		peerTries[queryPeer.Addr()]++
@@ -834,16 +836,8 @@ checkResponses:
 			}
 			break checkResponses
 
-		case <-peerDeadline.C:
-			// The peer's turn is over, whatever it's sending.
-			turnOver = true
-			if !peerTimeout.Stop() {
-				select {
-				case <-peerTimeout.C:
-				default:
-				}
-			}
-			peerTimeout.Reset(0)
+		case <-turn.deadline.C:
+			turn.end()
 
 		case <-s.quit:
 			// Same when chain server's quit is signaled.
@@ -864,15 +858,7 @@ checkResponses:
 			// Each time we receive a response from the current
 			// peer, we'll reset the main peer timeout as they're
 			// being responsive, unless their turn is over.
-			if !turnOver {
-				if !peerTimeout.Stop() {
-					select {
-					case <-peerTimeout.C:
-					default:
-					}
-				}
-				peerTimeout.Reset(qo.timeout)
-			}
+			turn.responded()
 
 			// Also at this point, if the peerConnectTimeout is
 			// still active, then we can disable it, as we're
@@ -893,14 +879,7 @@ checkResponses:
 			}
 
 			// The next peer gets a turn of its own.
-			turnOver = false
-			if !peerDeadline.Stop() {
-				select {
-				case <-peerDeadline.C:
-				default:
-				}
-			}
-			peerDeadline.Reset(qo.timeout * maxPeerQueryTimeouts)
+			turn.next()
 
 			queryPeer = nil
 			for _, peer := range s.Peers() {
@@ -944,6 +923,80 @@ checkResponses:
 	if qo.doneChan != nil {
 		close(qo.doneChan)
 	}
+}
+
+// peerTurn bounds how long a peer has a query.
+type peerTurn struct {
+	timeout  time.Duration
+	idle     *time.Timer
+	deadline *time.Timer
+	over     bool
+}
+
+// newPeerTurn returns the turn of the first peer, with the timer that's reset
+// each time the peer sends something.
+func newPeerTurn(idle *time.Timer, timeout time.Duration) *peerTurn {
+	return &peerTurn{
+		timeout:  timeout,
+		idle:     idle,
+		deadline: time.NewTimer(timeout * maxPeerQueryTimeouts),
+	}
+}
+
+// responded gives the peer another timeout, unless its turn is over.
+func (t *peerTurn) responded() {
+	if !t.over {
+		resetTimer(t.idle, t.timeout)
+	}
+}
+
+// end ends the peer's turn, whatever it's sending, as the idle timer firing does.
+func (t *peerTurn) end() {
+	t.over = true
+	resetTimer(t.idle, 0)
+}
+
+// next starts the next peer's turn.
+func (t *peerTurn) next() {
+	t.over = false
+	resetTimer(t.deadline, t.timeout*maxPeerQueryTimeouts)
+}
+
+func (t *peerTurn) stop() {
+	t.deadline.Stop()
+}
+
+// resetTimer sets a timer, whether or not it has fired.
+func resetTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
+
+// lockCFilter takes the lock on filter queries, and returns false if the query's
+// caller gave up first.  The query that has it can take a while with a peer that
+// doesn't answer, and a sync.Mutex can't be waited on along with a channel.
+func (s *ChainService) lockCFilter(options ...QueryOption) bool {
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	if qo.quit == nil {
+		s.mtxCFilter.Lock()
+		return true
+	}
+	for !s.mtxCFilter.TryLock() {
+		select {
+		case <-qo.quit:
+			return false
+		case <-s.quit:
+			return false
+		case <-time.After(cfilterLockPoll):
+		}
+	}
+	return true
 }
 
 // getFilterFromCache returns a filter from ChainService's FilterCache if it
@@ -1297,7 +1350,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 	// We acquire the mutex ensuring we don't have several redundant
 	// CFilter queries running in parallel.
-	s.mtxCFilter.Lock()
+	if !s.lockCFilter(options...) {
+		return nil, ErrFilterFetchFailed
+	}
 
 	// Since another request might have added the filter to the cache while
 	// we were waiting for the mutex, we do a final lookup before starting

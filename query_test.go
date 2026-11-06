@@ -741,3 +741,41 @@ func TestGetCFilterAfterRollback(t *testing.T) {
 		t.Fatal("expected no repair of the filter headers requested")
 	}
 }
+
+// TestPeerTurnEndsDespiteMessages ensures a peer that keeps sending messages loses
+// its turn, and that the next peer gets a turn of its own.  The timers are too long
+// to fire, so that it doesn't depend on how the test is scheduled.
+func TestPeerTurnEndsDespiteMessages(t *testing.T) {
+	idle := time.NewTimer(time.Hour)
+	turn := newPeerTurn(idle, time.Hour)
+	defer turn.stop()
+
+	turn.responded()
+	turn.end()
+	turn.responded()
+	select {
+	case <-idle.C:
+	case <-time.After(time.Minute):
+		t.Fatal("a message kept the peer's turn going")
+	}
+
+	// The timer has fired, so it's only running if the message reset it.
+	turn.next()
+	turn.responded()
+	if !idle.Stop() {
+		t.Fatal("the next peer's turn is over")
+	}
+}
+
+// TestLockCFilterGivesUp ensures a query that can give up doesn't wait for a lock
+// another query holds.
+func TestLockCFilterGivesUp(t *testing.T) {
+	s := &ChainService{quit: make(chan struct{})}
+	s.mtxCFilter.Lock()
+	defer s.mtxCFilter.Unlock()
+	quit := make(chan struct{})
+	close(quit)
+	if s.lockCFilter(QueryQuit(quit)) {
+		t.Fatal("took a lock that's held")
+	}
+}
