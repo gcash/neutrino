@@ -75,6 +75,10 @@ type QueryAccess interface {
 // QueryAccess interface.
 var _ QueryAccess = (*ChainService)(nil)
 
+// maxPeerQueryTimeouts is how many timeouts of a query a peer can use, however
+// much it keeps sending.
+const maxPeerQueryTimeouts = 10
+
 // queries are a set of options that can be modified per-query, unlike global
 // options.
 //
@@ -106,6 +110,9 @@ type queryOptions struct {
 	// doneChan lets the query signal the caller when it's done, in case
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
+
+	// quit ends the query early, as a shutdown does.
+	quit <-chan struct{}
 
 	// invalidTxThreshold is the threshold for the fraction of peers
 	// that need to respond to a TX with a code of pushtx.Invalid to count
@@ -223,6 +230,13 @@ func Encoding(encoding wire.MessageEncoding) QueryOption {
 func DoneChan(doneChan chan<- struct{}) QueryOption {
 	return func(qo *queryOptions) {
 		qo.doneChan = doneChan
+	}
+}
+
+// QueryQuit has a query end early when the channel closes, as a shutdown does.
+func QueryQuit(quit <-chan struct{}) QueryOption {
+	return func(qo *queryOptions) {
+		qo.quit = quit
 	}
 }
 
@@ -783,6 +797,13 @@ func queryChainServicePeers(
 	// it's time to quit.
 	peerTimeout := time.NewTimer(qo.timeout)
 	connectionTimeout := time.NewTimer(qo.peerConnectTimeout)
+
+	// peerDeadline bounds a peer's turn, as any message it sends resets
+	// peerTimeout, whether or not it answers the query, and one that keeps
+	// sending others would otherwise keep the query forever.
+	peerDeadline := time.NewTimer(qo.timeout * maxPeerQueryTimeouts)
+	defer peerDeadline.Stop()
+	turnOver := false
 	connectionTicker := connectionTimeout.C
 	if queryPeer != nil {
 		peerTries[queryPeer.Addr()]++
@@ -806,6 +827,24 @@ checkResponses:
 			}
 			break checkResponses
 
+		case <-qo.quit:
+			// Same when the caller gives up.
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
+			}
+			break checkResponses
+
+		case <-peerDeadline.C:
+			// The peer's turn is over, whatever it's sending.
+			turnOver = true
+			if !peerTimeout.Stop() {
+				select {
+				case <-peerTimeout.C:
+				default:
+				}
+			}
+			peerTimeout.Reset(0)
+
 		case <-s.quit:
 			// Same when chain server's quit is signaled.
 			if queryPeer != nil {
@@ -824,14 +863,16 @@ checkResponses:
 
 			// Each time we receive a response from the current
 			// peer, we'll reset the main peer timeout as they're
-			// being responsive.
-			if !peerTimeout.Stop() {
-				select {
-				case <-peerTimeout.C:
-				default:
+			// being responsive, unless their turn is over.
+			if !turnOver {
+				if !peerTimeout.Stop() {
+					select {
+					case <-peerTimeout.C:
+					default:
+					}
 				}
+				peerTimeout.Reset(qo.timeout)
 			}
-			peerTimeout.Reset(qo.timeout)
 
 			// Also at this point, if the peerConnectTimeout is
 			// still active, then we can disable it, as we're
@@ -850,6 +891,16 @@ checkResponses:
 			if queryPeer != nil {
 				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
+
+			// The next peer gets a turn of its own.
+			turnOver = false
+			if !peerDeadline.Stop() {
+				select {
+				case <-peerDeadline.C:
+				default:
+				}
+			}
+			peerDeadline.Reset(qo.timeout * maxPeerQueryTimeouts)
 
 			queryPeer = nil
 			for _, peer := range s.Peers() {

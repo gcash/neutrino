@@ -94,14 +94,14 @@ func searchSpends(source spendSearchSource, outpoints []wire.OutPoint, from, to 
 		if err != nil {
 			return reached, err
 		}
-		matched, err := spendFilterMatches(source, hash, entries, batch)
+		matched, err := spendFilterMatches(source, hash, entries, batch, QueryQuit(quit))
 		if err != nil {
-			return reached, err
+			return reached, stopped(err, quit, shutdown)
 		}
 		if matched {
-			block, err := source.GetBlock(*hash)
+			block, err := source.GetBlock(*hash, QueryQuit(quit))
 			if err != nil {
-				return reached, err
+				return reached, stopped(err, quit, shutdown)
 			}
 			if block == nil {
 				return reached, errors.New("no block for a filter that matched")
@@ -122,6 +122,19 @@ func searchSpends(source spendSearchSource, outpoints []wire.OutPoint, from, to 
 	return reached, nil
 }
 
+// stopped returns ErrSpendSearchCancelled for an error that ending the search
+// brought, as a query that's told to quit just ends without what it asked for.
+func stopped(err error, quit, shutdown <-chan struct{}) error {
+	select {
+	case <-quit:
+		return ErrSpendSearchCancelled
+	case <-shutdown:
+		return ErrSpendSearchCancelled
+	default:
+		return err
+	}
+}
+
 // spendFilterEntries returns the outpoints as a block's filter holds them.
 func spendFilterEntries(watched map[wire.OutPoint]struct{}) ([][]byte, error) {
 	entries := make([][]byte, 0, len(watched))
@@ -138,9 +151,9 @@ func spendFilterEntries(watched map[wire.OutPoint]struct{}) ([][]byte, error) {
 // spendFilterMatches returns whether the filter of the block matches any of the
 // entries.  It only ever tells that a block may hold one.
 func spendFilterMatches(source spendSearchSource, hash *chainhash.Hash, entries [][]byte,
-	batch QueryOption) (bool, error) {
+	options ...QueryOption) (bool, error) {
 
-	filter, err := source.GetCFilter(*hash, wire.GCSFilterRegular, batch)
+	filter, err := source.GetCFilter(*hash, wire.GCSFilterRegular, options...)
 	if err != nil {
 		return false, err
 	}

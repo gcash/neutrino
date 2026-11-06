@@ -402,3 +402,38 @@ func TestSearchSpendsMissingBlock(t *testing.T) {
 		t.Fatalf("reached %d, %v", reached, err)
 	}
 }
+
+// quitDuringQuery is a chain whose filter query ends when its quit closes, as a
+// peer that holds the query up would have it do.
+type quitDuringQuery struct {
+	*spendTestChain
+	quit chan struct{}
+}
+
+func (c *quitDuringQuery) GetCFilter(chainhash.Hash, wire.FilterType,
+	...QueryOption) (*gcs.Filter, error) {
+
+	close(c.quit)
+	return nil, ErrFilterFetchFailed
+}
+
+// TestSearchSpendsQuitDuringQuery ensures a query that a closed quit ended
+// cancels the search, rather than reading as a failure.
+func TestSearchSpendsQuitDuringQuery(t *testing.T) {
+	c := &quitDuringQuery{spendTestChain: newSpendTestChain(t, 5, nil), quit: make(chan struct{})}
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{1}}
+	_, err := searchSpends(c, []wire.OutPoint{outpoint}, 1, 3, nil, nil, c.quit, nil)
+	if !errors.Is(err, ErrSpendSearchCancelled) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// TestQueryQuitOption ensures the option reaches the query.
+func TestQueryQuitOption(t *testing.T) {
+	quit := make(chan struct{})
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(QueryQuit(quit))
+	if qo.quit == nil {
+		t.Fatal("no quit")
+	}
+}
