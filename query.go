@@ -75,8 +75,8 @@ type QueryAccess interface {
 // QueryAccess interface.
 var _ QueryAccess = (*ChainService)(nil)
 
-// maxPeerQueryTimeouts is how many timeouts of a query a peer can use, however
-// much it keeps sending.
+// maxPeerQueryTimeouts is how many timeouts of a query one turn of a peer can
+// use, however much it keeps sending.  A peer gets a turn for each retry.
 const maxPeerQueryTimeouts = 10
 
 // cfilterLockPoll is how often a query that can give up tries the filter lock.
@@ -806,21 +806,62 @@ func queryChainServicePeers(
 	// others would otherwise keep the query forever.
 	turn := newPeerTurn(peerTimeout, qo.timeout)
 	defer turn.stop()
+	defer connectionTimeout.Stop()
+
+	// That's for a query with no peer to ask, so it must not end one that
+	// has peers left to try.
 	connectionTicker := connectionTimeout.C
+
+	// askNextPeer asks the next peer that's connected, if any has tries left.
+	askNextPeer := func() {
+		queryPeer = nil
+		for _, peer := range s.Peers() {
+			// If the peer is no longer connected, we'll skip them.
+			if !peer.Connected() {
+				continue
+			}
+
+			// If we've yet to try this peer, we'll make sure to do
+			// so. If we've exceeded the number of tries we should
+			// retry this peer, then we'll skip them.
+			numTries, ok := peerTries[peer.Addr()]
+			if ok && numTries >= qo.numRetries {
+				continue
+			}
+
+			queryPeer = peer
+
+			// Found a peer we can query.
+			peerTries[queryPeer.Addr()]++
+			queryPeer.subscribeRecvMsg(subscription)
+			queryPeer.QueueMessageWithEncoding(
+				queryMsg, nil, qo.encoding,
+			)
+			break
+		}
+	}
 	if queryPeer != nil {
 		peerTries[queryPeer.Addr()]++
 		queryPeer.subscribeRecvMsg(subscription)
 		queryPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
+	} else {
+		askNextPeer()
+	}
+	if queryPeer != nil {
+		connectionTicker = nil
 	}
 checkResponses:
 	for {
 		select {
 		case <-connectionTicker:
-			// When we time out, we're done.
-			if queryPeer != nil {
-				queryPeer.unsubscribeRecvMsgs(subscription)
+			// When we time out, we're done, unless a peer has
+			// connected meanwhile.
+			askNextPeer()
+			if queryPeer == nil {
+				break checkResponses
 			}
-			break checkResponses
+			connectionTicker = nil
+			turn.next()
 
 		case <-queryQuit:
 			// Same when we get a quit signal.
@@ -860,17 +901,6 @@ checkResponses:
 			// being responsive, unless their turn is over.
 			turn.responded()
 
-			// Also at this point, if the peerConnectTimeout is
-			// still active, then we can disable it, as we're
-			// receiving responses from the current peer.
-			if connectionTicker != nil && !connectionTimeout.Stop() {
-				select {
-				case <-connectionTimeout.C:
-				default:
-				}
-			}
-			connectionTicker = nil
-
 		// The current peer we're querying has failed to answer the
 		// query. Time to select a new peer and query it.
 		case <-peerTimeout.C:
@@ -881,39 +911,14 @@ checkResponses:
 			// The next peer gets a turn of its own.
 			turn.next()
 
-			queryPeer = nil
-			for _, peer := range s.Peers() {
-				// If the peer is no longer connected, we'll
-				// skip them.
-				if !peer.Connected() {
-					continue
-				}
-
-				// If we've yet to try this peer, we'll make
-				// sure to do so. If we've exceeded the number
-				// of tries we should retry this peer, then
-				// we'll skip them.
-				numTries, ok := peerTries[peer.Addr()]
-				if ok && numTries >= qo.numRetries {
-					continue
-				}
-
-				queryPeer = peer
-
-				// Found a peer we can query.
-				peerTries[queryPeer.Addr()]++
-				queryPeer.subscribeRecvMsg(subscription)
-				queryPeer.QueueMessageWithEncoding(
-					queryMsg, nil, qo.encoding,
-				)
-				break
-			}
+			askNextPeer()
 
 			// If at this point, we don't yet have a query peer,
 			// then we'll exit now as all the peers are exhausted.
 			if queryPeer == nil {
 				break checkResponses
 			}
+			connectionTicker = nil
 		}
 	}
 
@@ -999,6 +1004,20 @@ func (s *ChainService) lockCFilter(options ...QueryOption) bool {
 		}
 	}
 	return true
+}
+
+// queryEnded returns whether a query's caller gave up or we're shutting down.
+func (s *ChainService) queryEnded(options ...QueryOption) bool {
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	select {
+	case <-qo.quit:
+		return true
+	case <-s.quit:
+		return true
+	default:
+		return false
+	}
 }
 
 // getFilterFromCache returns a filter from ChainService's FilterCache if it
@@ -1353,6 +1372,12 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// We acquire the mutex ensuring we don't have several redundant
 	// CFilter queries running in parallel.
 	if !s.lockCFilter(options...) {
+		select {
+		case <-s.quit:
+			return nil, ErrShuttingDown
+		default:
+		}
+
 		return nil, ErrFilterFetchFailed
 	}
 
@@ -1406,8 +1431,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 			// If the filter headers were rolled back meanwhile,
 			// the query ended without checking every filter
-			// served against the filter headers that stand.
-			if query.stale {
+			// served against the filter headers that stand. And
+			// a query that was ended didn't ask every peer.
+			if query.stale || s.queryEnded(query.options...) {
 				return
 			}
 
@@ -1515,6 +1541,11 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 // be used to check the filter headers themselves.
 func (s *ChainService) fetchBlock(inv *wire.InvVect, height uint32,
 	options ...QueryOption) (*bchutil.Block, error) {
+
+	// A block comes as one message, so nothing resets a peer's timeout
+	// while it does, and it can take a slow link longer than a small
+	// answer.  A caller's timeout still comes first.
+	options = append([]QueryOption{Timeout(QueryBatchTimeout)}, options...)
 
 	blockHash := inv.Hash
 

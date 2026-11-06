@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"math/rand"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,10 +17,12 @@ import (
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/peer"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
+	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
 	"github.com/gcash/neutrino/cache"
 	"github.com/gcash/neutrino/cache/lru"
@@ -760,10 +763,15 @@ func TestPeerTurnEndsDespiteMessages(t *testing.T) {
 	}
 
 	// The timer has fired, so it's only running if the turn started it, and
-	// the next peer has a timeout without sending anything.
+	// the next peer has a timeout without sending anything.  The deadline
+	// is stopped first for the same reason, as the next peer has its own.
+	turn.deadline.Stop()
 	turn.next()
 	if !idle.Stop() {
 		t.Fatal("the next peer has no timeout")
+	}
+	if !turn.deadline.Stop() {
+		t.Fatal("the next peer has no deadline")
 	}
 
 	// It's stopped now, so it's only running if the message reset it.
@@ -774,7 +782,7 @@ func TestPeerTurnEndsDespiteMessages(t *testing.T) {
 }
 
 // TestLockCFilterGivesUp ensures a query that can give up doesn't wait for a lock
-// another query holds.
+// another query holds, and leaves when we're shutting down too.
 func TestLockCFilterGivesUp(t *testing.T) {
 	s := &ChainService{quit: make(chan struct{})}
 	s.mtxCFilter.Lock()
@@ -783,5 +791,379 @@ func TestLockCFilterGivesUp(t *testing.T) {
 	close(quit)
 	if s.lockCFilter(QueryQuit(quit)) {
 		t.Fatal("took a lock that's held")
+	}
+
+	close(s.quit)
+	if s.lockCFilter(QueryQuit(make(chan struct{}))) {
+		t.Fatal("took a lock that's held while shutting down")
+	}
+}
+
+// TestLockCFilterWaits ensures a query that can give up gets the lock once it's
+// free, rather than giving up because it was held.
+func TestLockCFilterWaits(t *testing.T) {
+	s := &ChainService{quit: make(chan struct{})}
+	s.mtxCFilter.Lock()
+	got := make(chan bool, 1)
+	go func() { got <- s.lockCFilter(QueryQuit(make(chan struct{}))) }()
+
+	// Long enough for a wait that gives up to show itself.
+	time.Sleep(cfilterLockPoll * 2)
+	s.mtxCFilter.Unlock()
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatal("gave up with nothing telling it to")
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("didn't take a lock that's free")
+	}
+}
+
+// TestGetCFilterShuttingDown ensures a query waiting for the lock says why it left.
+func TestGetCFilterShuttingDown(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 1500)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip)
+	cs := rt.bm.server
+	cs.quit = make(chan struct{})
+	close(cs.quit)
+	cs.mtxCFilter.Lock()
+	defer cs.mtxCFilter.Unlock()
+	_, err := cs.GetCFilter(
+		rt.blockHashes[rt.divergence], wire.GCSFilterRegular,
+		QueryQuit(make(chan struct{})),
+	)
+	if !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("expected ErrShuttingDown, got %v", err)
+	}
+}
+
+// TestGetCFilterGaveUpRequestsNoRepair ensures a query that was ended asks for no
+// repair of the filter headers, as peers it didn't ask could have had the filter.
+func TestGetCFilterGaveUpRequestsNoRepair(t *testing.T) {
+	t.Parallel()
+
+	rt := setupRepairTest(t, 1500)
+	rt.storeFilterChain(t, rt.wrong, repairTestTip)
+	cs := rt.bm.server
+	cs.quit = make(chan struct{})
+	blockHash := rt.blockHashes[rt.divergence]
+	data, err := rt.right.filters[rt.divergence].NBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gaveUp := make(chan struct{})
+	cs.queryPeers = func(_ wire.Message, f func(*ServerPeer,
+		wire.Message, chan<- struct{}), _ ...QueryOption) {
+
+		f(nil, wire.NewMsgCFilter(
+			wire.GCSFilterRegular, &blockHash, data,
+		), make(chan struct{}))
+		close(gaveUp)
+	}
+
+	filter, err := cs.GetCFilter(
+		blockHash, wire.GCSFilterRegular, QueryQuit(gaveUp),
+	)
+	if filter != nil {
+		t.Fatalf("expected no filter, got %v, %v", filter, err)
+	}
+
+	// The query holds the lock on filter queries until it's done.
+	cs.mtxCFilter.Lock()
+	rt.bm.newHeadersMtx.Lock()
+	requested := rt.bm.filterRepairRequested
+	rt.bm.newHeadersMtx.Unlock()
+	cs.mtxCFilter.Unlock()
+	if requested {
+		t.Fatal("expected no repair of the filter headers requested")
+	}
+}
+
+// TestRescanQueriesEnd ensures a rescan's queries for blocks and for the filters it
+// catches up with end when it stops, and keep the options it gave them.
+func TestRescanQueriesEnd(t *testing.T) {
+	quit := make(chan struct{})
+	close(quit)
+	var got *queryOptions
+	chain := &blockOptionsChain{options: func(options []QueryOption) {
+		got = defaultQueryOptions()
+		got.applyQueryOptions(options...)
+	}}
+	ro := &rescanOptions{
+		quit:         quit,
+		queryOptions: []QueryOption{Timeout(time.Second)},
+	}
+	_, _ = extractBlockMatches(chain, ro, &waddrmgr.BlockStamp{})
+	if got == nil || got.quit == nil || got.timeout != time.Second {
+		t.Fatalf("%+v", got)
+	}
+
+	got = nil
+	_, _ = blockFilterMatches(chain, ro, &chainhash.Hash{})
+	if got == nil || got.quit == nil || got.optimisticBatch == noBatch {
+		t.Fatalf("%+v", got)
+	}
+
+	got = nil
+	if len((&rescanOptions{}).withQuit(Timeout(time.Second))) != 1 {
+		t.Fatal("added a quit option for a rescan with none")
+	}
+}
+
+// blockOptionsChain tells what a block was asked for with.
+type blockOptionsChain struct {
+	ChainSource
+	options func([]QueryOption)
+}
+
+func (c *blockOptionsChain) GetBlock(_ chainhash.Hash,
+	options ...QueryOption) (*bchutil.Block, error) {
+
+	c.options(options)
+	return nil, errors.New("no block")
+}
+
+func (c *blockOptionsChain) GetCFilter(_ chainhash.Hash, _ wire.FilterType,
+	options ...QueryOption) (*gcs.Filter, error) {
+
+	c.options(options)
+	return nil, errors.New("no filter")
+}
+
+// TestFetchBlockTimeout ensures a block gets the longer timeout, unless the caller
+// asks for its own.
+func TestFetchBlockTimeout(t *testing.T) {
+	var timeout time.Duration
+	s := &ChainService{queryPeers: func(_ wire.Message, _ func(*ServerPeer,
+		wire.Message, chan<- struct{}), options ...QueryOption) {
+
+		qo := defaultQueryOptions()
+		qo.applyQueryOptions(options...)
+		timeout = qo.timeout
+	}}
+	inv := wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{})
+	if _, err := s.fetchBlock(inv, 1); err == nil {
+		t.Fatal("expected no block")
+	}
+	if timeout != QueryBatchTimeout {
+		t.Fatalf("timeout %v", timeout)
+	}
+	if _, err := s.fetchBlock(inv, 1, Timeout(time.Second)); err == nil {
+		t.Fatal("expected no block")
+	}
+	if timeout != time.Second {
+		t.Fatalf("timeout %v", timeout)
+	}
+}
+
+// silentPeers returns a service with connected peers that never answer, the first
+// of them the sync peer.
+func silentPeers(t *testing.T, count int) (*ChainService, []*ServerPeer) {
+	t.Helper()
+	return silentPeersLater(t, count, 0)
+}
+
+// silentPeersLater is silentPeers, with no peer yet for the first askings.
+func silentPeersLater(t *testing.T, count, askings int) (*ChainService, []*ServerPeer) {
+	t.Helper()
+	s := &ChainService{
+		quit:         make(chan struct{}),
+		query:        make(chan interface{}),
+		blockManager: &blockManager{},
+	}
+	peers := make([]*ServerPeer, 0, count)
+	for i := range count {
+		sp := newServerPeer(s, false)
+		var err error
+		sp.Peer, err = peer.NewOutboundPeer(
+			&peer.Config{ChainParams: &chaincfg.SimNetParams},
+			fmt.Sprintf("127.0.0.1:%d", 18000+i),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local, remote := net.Pipe()
+		sp.AssociateConnection(local)
+		go func() { _, _ = io.Copy(io.Discard, remote) }()
+		t.Cleanup(func() {
+			sp.Disconnect()
+			_ = remote.Close()
+		})
+		peers = append(peers, sp)
+	}
+	s.blockManager.syncPeer = peers[0]
+	go func() {
+		for {
+			select {
+			case query := <-s.query:
+				if askings > 0 {
+					askings--
+					query.(getPeersMsg).reply <- nil
+					continue
+				}
+				query.(getPeersMsg).reply <- peers
+			case <-s.quit:
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { close(s.quit) })
+	return s, peers
+}
+
+// TestQueryTriesEachSilentPeer ensures each peer gets a timeout of its own, and that
+// the timeout for having no peer doesn't end a query that has one.  The query can't
+// end before its timeouts, and the limit is far below a turn left to its deadline.
+func TestQueryTriesEachSilentPeer(t *testing.T) {
+	t.Parallel()
+
+	s, _ := silentPeers(t, 2)
+	timeout := time.Second
+	start := time.Now()
+	queryChainServicePeers(
+		s, wire.NewMsgPing(1),
+		func(*ServerPeer, wire.Message, chan<- struct{}) {},
+		Timeout(timeout), NumRetries(1),
+		PeerConnectTimeout(time.Millisecond),
+	)
+	elapsed := time.Since(start)
+	if elapsed < 2*timeout {
+		t.Fatalf("a query ended after %v, without the last peer's turn",
+			elapsed)
+	}
+	if elapsed > maxPeerQueryTimeouts*timeout*8/10 {
+		t.Fatalf("a query took %v, as a silent peer had no timeout",
+			elapsed)
+	}
+}
+
+// TestQueryAsksWithoutSyncPeer ensures a query with no sync peer asks a connected
+// peer at once, rather than after a timeout.
+func TestQueryAsksWithoutSyncPeer(t *testing.T) {
+	t.Parallel()
+
+	s, peers := silentPeers(t, 1)
+	s.blockManager.syncPeer = nil
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(time.Hour), QueryQuit(quit),
+		)
+		close(done)
+	}()
+	defer func() {
+		close(quit)
+		<-done
+	}()
+	deadline := time.Now().Add(time.Minute)
+	for {
+		peers[0].mtxSubscribers.RLock()
+		asked := len(peers[0].recvSubscribers) != 0
+		peers[0].mtxSubscribers.RUnlock()
+		if asked {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no peer was asked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestQueryFindsPeerWithoutSyncPeer ensures a query that started with no peer to
+// ask isn't ended by that timeout once it has found one.
+func TestQueryFindsPeerWithoutSyncPeer(t *testing.T) {
+	t.Parallel()
+
+	s, _ := silentPeersLater(t, 2, 1)
+	s.blockManager.syncPeer = nil
+	timeout := time.Second
+	start := time.Now()
+	queryChainServicePeers(
+		s, wire.NewMsgPing(1),
+		func(*ServerPeer, wire.Message, chan<- struct{}) {},
+		Timeout(timeout), NumRetries(1),
+		PeerConnectTimeout(timeout*3/2),
+	)
+	if elapsed := time.Since(start); elapsed < 3*timeout {
+		t.Fatalf("a query ended after %v, during a peer's turn", elapsed)
+	}
+}
+
+// TestQueryLooksForPeerLastThing ensures a peer that connected while a query waited
+// for one is asked, rather than the query ending as its time for that ran out.
+func TestQueryLooksForPeerLastThing(t *testing.T) {
+	t.Parallel()
+
+	s, _ := silentPeersLater(t, 1, 1)
+	s.blockManager.syncPeer = nil
+	timeout := time.Second
+	start := time.Now()
+	queryChainServicePeers(
+		s, wire.NewMsgPing(1),
+		func(*ServerPeer, wire.Message, chan<- struct{}) {},
+		Timeout(timeout), NumRetries(1),
+		PeerConnectTimeout(timeout/2),
+	)
+	if elapsed := time.Since(start); elapsed < timeout*3/2 {
+		t.Fatalf("a query ended after %v, without the peer's whole turn",
+			elapsed)
+	}
+}
+
+// TestQueryEndsChattyPeersTurn ensures a peer that keeps sending messages that
+// don't answer the query doesn't keep it.
+func TestQueryEndsChattyPeersTurn(t *testing.T) {
+	t.Parallel()
+
+	s, peers := silentPeers(t, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			peers[0].mtxSubscribers.RLock()
+			subscriptions := make([]spMsgSubscription, 0, 1)
+			for subscription := range peers[0].recvSubscribers {
+				subscriptions = append(subscriptions, subscription)
+			}
+			peers[0].mtxSubscribers.RUnlock()
+			for _, subscription := range subscriptions {
+				select {
+				case subscription.msgChan <- spMsg{
+					sp:  peers[0],
+					msg: wire.NewMsgPing(1),
+				}:
+				case <-subscription.quitChan:
+				case <-stop:
+					return
+				}
+			}
+			select {
+			case <-time.After(time.Millisecond):
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(100*time.Millisecond), NumRetries(1),
+		)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("a peer's messages kept the query going")
 	}
 }

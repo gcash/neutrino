@@ -614,9 +614,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 
 		// Otherwise, we'll attempt to fetch the filter to retrieve the
 		// relevant transactions and notify them.
-		queryOptions := NumRetries(0)
 		blockFilter, err := chain.GetCFilter(
-			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
+			newStamp.Hash, wire.GCSFilterRegular,
+			ro.withQuit(NumRetries(0))...,
 		)
 		if errors.Is(err, ErrShuttingDown) {
 			return err
@@ -1171,7 +1171,7 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
-	block, err := chain.GetBlock(curStamp.Hash, ro.queryOptions...)
+	block, err := chain.GetBlock(curStamp.Hash, ro.withQuit(ro.queryOptions...)...)
 	switch {
 	case errors.Is(err, ErrShuttingDown):
 		return nil, err
@@ -1275,6 +1275,16 @@ func matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
 	return matched, nil
 }
 
+// withQuit returns the options with one that ends a query when the rescan stops,
+// as its peers can take minutes to run out.
+func (ro *rescanOptions) withQuit(options ...QueryOption) []QueryOption {
+	options = options[:len(options):len(options)]
+	if ro.quit != nil {
+		options = append(options, QueryQuit(ro.quit))
+	}
+	return options
+}
+
 // blockFilterMatches returns whether the block filter matches the watched
 // items. If this returns false, it means the block is certainly not interesting
 // to us.
@@ -1286,7 +1296,8 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	// filters. To speed up the fetching, we make an optimistic batch
 	// query.
 	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular, OptimisticBatch(),
+		*blockHash, wire.GCSFilterRegular,
+		ro.withQuit(OptimisticBatch())...,
 	)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {

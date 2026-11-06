@@ -1710,6 +1710,7 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	blockHash := header.BlockHash()
 	block, err := b.server.fetchBlock(
 		wire.NewInvVect(wire.InvTypeBlock, &blockHash), targetHeight,
+		QueryQuit(b.quit),
 	)
 	if err != nil {
 		return nil, err
@@ -1958,6 +1959,7 @@ findDifference:
 	blockHash := blockHeader.BlockHash()
 	block, err := b.server.fetchBlock(
 		wire.NewInvVect(wire.InvTypeBlock, &blockHash), height,
+		QueryQuit(b.quit),
 	)
 	if err != nil {
 		return err

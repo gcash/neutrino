@@ -320,10 +320,16 @@ scanToEnd:
 		if !fetch {
 			options := rescanOptions{
 				watchList: reporter.filterEntries,
+				quit:      s.quit,
 			}
 
 			match, err := s.cfg.BlockFilterMatches(&options, hash)
 			if err != nil {
+				select {
+				case <-s.quit:
+					return reporter.FailRemaining(ErrShuttingDown)
+				default:
+				}
 				return reporter.FailRemaining(err)
 			}
 
@@ -348,8 +354,13 @@ scanToEnd:
 
 		log.Debugf("Fetching block height=%d hash=%s", height, hash)
 
-		block, err := s.cfg.GetBlock(*hash)
+		block, err := s.cfg.GetBlock(*hash, QueryQuit(s.quit))
 		if err != nil {
+			select {
+			case <-s.quit:
+				return reporter.FailRemaining(ErrShuttingDown)
+			default:
+			}
 			return reporter.FailRemaining(err)
 		}
 
