@@ -356,6 +356,9 @@ scanToEnd:
 
 		block, err := s.cfg.GetBlock(*hash, QueryQuit(s.quit))
 		if err != nil {
+			// The new requests are only the reporter's once a block
+			// is processed, and they still need their answer.
+			reporter.addNewRequests(newReqs)
 			select {
 			case <-s.quit:
 				return reporter.FailRemaining(ErrShuttingDown)

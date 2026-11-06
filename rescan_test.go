@@ -1759,3 +1759,36 @@ func TestWaitForRetryRollback(t *testing.T) {
 		t.Fatalf("rewound to %v, want to block 5", rewound)
 	}
 }
+
+// TestRescanStopsWhileCatchingUp ensures a rescan that's stopped while catching up
+// ends at the next block, rather than going on to the tip.
+func TestRescanStopsWhileCatchingUp(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+	ctx.start(true)
+
+	// An invalid block has the rescan catch up by itself.
+	first := ctx.chain.addNewBlockMatching(testWatchScript, false)
+	ctx.chain.addNewBlockMatching(testWatchScript, false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+	ctx.assertFilterQueried(first.Hash)
+	ctx.assertBlockQueried(first.Hash)
+
+	// It's now telling of the first block, so it sees this before the next.
+	close(ctx.quit)
+	ctx.recvBlockConnected(first)
+	select {
+	case err := <-ctx.errChan:
+		if err != ErrRescanExit {
+			t.Fatalf("expected ErrRescanExit, got %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the rescan went on to the next block")
+	}
+}

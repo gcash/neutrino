@@ -1117,6 +1117,42 @@ func TestQueryLooksForPeerLastThing(t *testing.T) {
 	}
 }
 
+// TestQueryWaitsForFirstPeer ensures a query with no peer yet keeps looking for one
+// for its time to connect, and ends then if there still is none.
+func TestQueryWaitsForFirstPeer(t *testing.T) {
+	t.Parallel()
+
+	// There's no peer at the start or the first timeout, and one at the next,
+	// which then has its turn.
+	s, _ := silentPeersLater(t, 1, 2)
+	s.blockManager.syncPeer = nil
+	timeout := 2 * time.Second
+	start := time.Now()
+	queryChainServicePeers(
+		s, wire.NewMsgPing(1),
+		func(*ServerPeer, wire.Message, chan<- struct{}) {},
+		Timeout(timeout), NumRetries(1),
+		PeerConnectTimeout(timeout*5/2),
+	)
+	if elapsed := time.Since(start); elapsed < 3*timeout {
+		t.Fatalf("a query ended after %v without waiting for a peer",
+			elapsed)
+	}
+
+	s, _ = silentPeersLater(t, 1, 1000)
+	s.blockManager.syncPeer = nil
+	timeout = 100 * time.Millisecond
+	start = time.Now()
+	queryChainServicePeers(
+		s, wire.NewMsgPing(1),
+		func(*ServerPeer, wire.Message, chan<- struct{}) {},
+		Timeout(timeout), PeerConnectTimeout(5*timeout),
+	)
+	if elapsed := time.Since(start); elapsed < 5*timeout {
+		t.Fatalf("a query with no peer ended after %v", elapsed)
+	}
+}
+
 // TestQueryEndsChattyPeersTurn ensures a peer that keeps sending messages that
 // don't answer the query doesn't keep it.
 func TestQueryEndsChattyPeersTurn(t *testing.T) {

@@ -870,3 +870,43 @@ var Block100000 = wire.MsgBlock{
 		},
 	},
 }
+
+// TestUtxoScannerBlockFails ensures a request whose first block can't be fetched is
+// told so, rather than waiting for an answer that never comes.
+func TestUtxoScannerBlockFails(t *testing.T) {
+	mockChainClient := NewMockChainClient()
+	block100000Hash := Block100000.BlockHash()
+	mockChainClient.SetBlockHash(100000, &block100000Hash)
+	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
+
+	fetchErr := errors.New("cannot fetch block")
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock: func(chainhash.Hash, ...QueryOption,
+		) (*bchutil.Block, error) {
+			return nil, fetchErr
+		},
+		GetBlockHash:       mockChainClient.GetBlockHash,
+		BestSnapshot:       mockChainClient.BestSnapshot,
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
+	})
+	_ = scanner.Start()
+	defer func() { _ = scanner.Stop() }()
+
+	req, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	got := make(chan error, 1)
+	go func() {
+		_, err := req.Result(nil)
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		if !errors.Is(err, fetchErr) {
+			t.Fatalf("expected the fetch's error, got %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("the request wasn't answered")
+	}
+}

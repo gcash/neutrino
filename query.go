@@ -914,8 +914,13 @@ checkResponses:
 			askNextPeer()
 
 			// If at this point, we don't yet have a query peer,
-			// then we'll exit now as all the peers are exhausted.
+			// then we'll exit now as all the peers are exhausted,
+			// unless no peer was there to ask yet, as with a phone
+			// that lost reception, which gets its time to connect.
 			if queryPeer == nil {
+				if connectionTicker != nil {
+					continue
+				}
 				break checkResponses
 			}
 			connectionTicker = nil

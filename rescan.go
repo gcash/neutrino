@@ -949,6 +949,9 @@ rescanLoop:
 			// If the filter headers were rolled back below blocks
 			// we've scanned, we'll rewind to scan them again.
 			select {
+			case <-ro.quit:
+				return ErrRescanExit
+
 			case height := <-filterRollbacks:
 				if _, err := rewindTo(height); err != nil {
 					return err
