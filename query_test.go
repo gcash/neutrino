@@ -759,8 +759,14 @@ func TestPeerTurnEndsDespiteMessages(t *testing.T) {
 		t.Fatal("a message kept the peer's turn going")
 	}
 
-	// The timer has fired, so it's only running if the message reset it.
+	// The timer has fired, so it's only running if the turn started it, and
+	// the next peer has a timeout without sending anything.
 	turn.next()
+	if !idle.Stop() {
+		t.Fatal("the next peer has no timeout")
+	}
+
+	// It's stopped now, so it's only running if the message reset it.
 	turn.responded()
 	if !idle.Stop() {
 		t.Fatal("the next peer's turn is over")

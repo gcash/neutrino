@@ -956,9 +956,11 @@ func (t *peerTurn) end() {
 	resetTimer(t.idle, 0)
 }
 
-// next starts the next peer's turn.
+// next starts the next peer's turn, which has a timeout of its own, as the idle
+// timer has fired and only a message would start it again.
 func (t *peerTurn) next() {
 	t.over = false
+	resetTimer(t.idle, t.timeout)
 	resetTimer(t.deadline, t.timeout*maxPeerQueryTimeouts)
 }
 
