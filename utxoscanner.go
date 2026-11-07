@@ -77,6 +77,10 @@ func (r *GetUtxoRequest) Result(cancel <-chan struct{}) (*SpendReport, error) {
 	}
 }
 
+// utxoScanRetryWait is how long the scanner waits before trying a request that
+// a scan left in the queue.
+const utxoScanRetryWait = time.Second
+
 // UtxoScannerConfig exposes configurable methods for interacting with the blockchain.
 type UtxoScannerConfig struct {
 	// BestSnapshot returns the block stamp of the current chain tip.
@@ -243,6 +247,20 @@ func (s *UtxoScanner) batchManager() {
 		err := s.scanFromHeight(req.BirthHeight)
 		if err != nil {
 			log.Errorf("utxo scan failed: %v", err)
+		}
+
+		// A request the scan didn't take, as one for a height the chain
+		// hasn't reached yet, is still at the head of the queue, and it
+		// has to wait for something to change.
+		s.cv.L.Lock()
+		stuck := !s.pq.IsEmpty() && s.pq.Peek() == req
+		s.cv.L.Unlock()
+		if stuck {
+			select {
+			case <-time.After(utxoScanRetryWait):
+			case <-s.quit:
+				return
+			}
 		}
 	}
 }

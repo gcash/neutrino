@@ -110,6 +110,10 @@ type queryOptions struct {
 	// messages to a peer.
 	encoding wire.MessageEncoding
 
+	// peerLacks tells a message that says the peer doesn't have what was
+	// asked for, which ends its turn at once.
+	peerLacks func(wire.Message) bool
+
 	// doneChan lets the query signal the caller when it's done, in case
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
@@ -225,6 +229,14 @@ func RejectTimeout(rejectTimeout time.Duration) QueryOption {
 func Encoding(encoding wire.MessageEncoding) QueryOption {
 	return func(qo *queryOptions) {
 		qo.encoding = encoding
+	}
+}
+
+// peerLacks ends a peer's turn at a message the function tells, rather than
+// waiting for a timeout that its other messages keep putting off.
+func peerLacks(lacks func(wire.Message) bool) QueryOption {
+	return func(qo *queryOptions) {
+		qo.peerLacks = lacks
 	}
 }
 
@@ -901,6 +913,14 @@ checkResponses:
 			// being responsive, unless their turn is over.
 			turn.responded()
 
+			// A peer's own word ends its turn. What the last peer
+			// said is no word on this one.
+			if qo.peerLacks != nil && sm.sp == queryPeer &&
+				qo.peerLacks(sm.msg) {
+
+				turn.end()
+			}
+
 		// The current peer we're querying has failed to answer the
 		// query. Time to select a new peer and query it.
 		case <-peerTimeout.C:
@@ -1540,6 +1560,21 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
+// notFoundOf returns whether a message says the peer doesn't have what the inv
+// vector names.
+func notFoundOf(msg wire.Message, inv *wire.InvVect) bool {
+	notFound, ok := msg.(*wire.MsgNotFound)
+	if !ok {
+		return false
+	}
+	for _, item := range notFound.InvList {
+		if item.Hash == inv.Hash {
+			return true
+		}
+	}
+	return false
+}
+
 // fetchBlock requests the block with the given inv vector and height from the
 // network, one peer at a time, until one answers with it. Unlike GetBlock, it
 // neither checks the block against its filter header nor caches it, so it can
@@ -1551,6 +1586,12 @@ func (s *ChainService) fetchBlock(inv *wire.InvVect, height uint32,
 	// while it does, and it can take a slow link longer than a small
 	// answer.  A caller's timeout still comes first.
 	options = append([]QueryOption{Timeout(QueryBatchTimeout)}, options...)
+
+	// We have this block's header, so a peer that answers it hasn't got the
+	// block can only be missing it, and another peer may have it.
+	options = append(options, peerLacks(func(msg wire.Message) bool {
+		return notFoundOf(msg, inv)
+	}))
 
 	blockHash := inv.Hash
 

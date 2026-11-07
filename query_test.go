@@ -1153,6 +1153,111 @@ func TestQueryWaitsForFirstPeer(t *testing.T) {
 	}
 }
 
+// TestQueryMovesOnWhenPeerLacks ensures a peer that says it doesn't have what's asked
+// for loses its turn at once, and that a word on something else doesn't count.
+func TestQueryMovesOnWhenPeerLacks(t *testing.T) {
+	t.Parallel()
+
+	s, peers := silentPeers(t, 2)
+	wanted := wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{1})
+	other := wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{2})
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(time.Hour), NumRetries(1), QueryQuit(quit),
+			peerLacks(func(msg wire.Message) bool {
+				return notFoundOf(msg, wanted)
+			}),
+		)
+		close(done)
+	}()
+	defer func() {
+		close(quit)
+		<-done
+	}()
+
+	subscription := func(sp *ServerPeer) *spMsgSubscription {
+		sp.mtxSubscribers.RLock()
+		defer sp.mtxSubscribers.RUnlock()
+		for found := range sp.recvSubscribers {
+			return &found
+		}
+		return nil
+	}
+	wait := func(sp *ServerPeer) *spMsgSubscription {
+		t.Helper()
+		deadline := time.Now().Add(time.Minute)
+		for {
+			if found := subscription(sp); found != nil {
+				return found
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the peer wasn't asked")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	notFound := func(inv *wire.InvVect) *wire.MsgNotFound {
+		msg := wire.NewMsgNotFound()
+		if err := msg.AddInvVect(inv); err != nil {
+			t.Fatal(err)
+		}
+		return msg
+	}
+
+	// The channel takes messages one at a time, so a word has been dealt with
+	// once the next is taken, and a turn that it ended moves on among these.
+	first := wait(peers[0])
+	settle := func() {
+		for range 200 {
+			first.msgChan <- spMsg{sp: peers[0], msg: wire.NewMsgPing(2)}
+		}
+	}
+	first.msgChan <- spMsg{sp: peers[0], msg: notFound(other)}
+	settle()
+	if subscription(peers[1]) != nil {
+		t.Fatal("a word on another block ended the turn")
+	}
+
+	// What the last peer said doesn't count against this one, shown here by
+	// a word from a peer that isn't being asked.
+	first.msgChan <- spMsg{sp: peers[1], msg: notFound(wanted)}
+	settle()
+	if subscription(peers[1]) != nil {
+		t.Fatal("another peer's word ended the turn")
+	}
+
+	first.msgChan <- spMsg{sp: peers[0], msg: notFound(wanted)}
+	wait(peers[1])
+}
+
+// TestFetchBlockPeerLacks ensures a block's query counts a notfound for that block.
+func TestFetchBlockPeerLacks(t *testing.T) {
+	var lacks func(wire.Message) bool
+	s := &ChainService{queryPeers: func(_ wire.Message, _ func(*ServerPeer,
+		wire.Message, chan<- struct{}), options ...QueryOption) {
+
+		qo := defaultQueryOptions()
+		qo.applyQueryOptions(options...)
+		lacks = qo.peerLacks
+	}}
+	inv := wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{1})
+	_, _ = s.fetchBlock(inv, 1)
+	if lacks == nil {
+		t.Fatal("no check")
+	}
+	msg := wire.NewMsgNotFound()
+	if err := msg.AddInvVect(inv); err != nil {
+		t.Fatal(err)
+	}
+	if !lacks(msg) || lacks(wire.NewMsgNotFound()) || lacks(wire.NewMsgPing(1)) {
+		t.Fatal("wrong answer")
+	}
+}
+
 // TestQueryEndsChattyPeersTurn ensures a peer that keeps sending messages that
 // don't answer the query doesn't keep it.
 func TestQueryEndsChattyPeersTurn(t *testing.T) {

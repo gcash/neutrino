@@ -56,6 +56,9 @@ type mockChainSource struct {
 	// subscriptions, if set, receives the height of each attempt to
 	// subscribe to block notifications.
 	subscriptions chan uint32
+
+	// filterOptions is what the last filter was asked for with.
+	filterOptions []QueryOption
 }
 
 var _ ChainSource = (*mockChainSource)(nil)
@@ -453,6 +456,7 @@ func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.filterOptions = options
 	if c.failGetFilter {
 		return nil, errors.New("failed filter")
 	}
@@ -1790,5 +1794,31 @@ func TestRescanStopsWhileCatchingUp(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("the rescan went on to the next block")
+	}
+}
+
+// TestRescanConnectedBlockFilterEnds ensures the query for a new block's filter ends
+// when the rescan stops, and keeps its own options.
+func TestRescanConnectedBlockFilterEnds(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	block := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.recvBlockConnected(block)
+
+	ctx.chain.mu.Lock()
+	options := ctx.chain.filterOptions
+	ctx.chain.mu.Unlock()
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	if qo.quit == nil || qo.numRetries != 0 {
+		t.Fatalf("quit %v, retries %d", qo.quit, qo.numRetries)
 	}
 }

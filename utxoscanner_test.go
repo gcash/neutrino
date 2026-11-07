@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -908,5 +909,36 @@ func TestUtxoScannerBlockFails(t *testing.T) {
 		}
 	case <-time.After(time.Minute):
 		t.Fatal("the request wasn't answered")
+	}
+}
+
+// TestUtxoScannerWaitsForHeight ensures a request for a height the chain hasn't
+// reached has the scanner wait, rather than try again as fast as it can.
+func TestUtxoScannerWaitsForHeight(t *testing.T) {
+	mockChainClient := NewMockChainClient()
+	block100000Hash := Block100000.BlockHash()
+	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
+
+	var scans atomic.Int32
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock:     mockChainClient.GetBlockFromNetwork,
+		GetBlockHash: mockChainClient.GetBlockHash,
+		BestSnapshot: func() (*waddrmgr.BlockStamp, error) {
+			scans.Add(1)
+			return mockChainClient.BestSnapshot()
+		},
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
+	})
+	_ = scanner.Start()
+	defer func() { _ = scanner.Stop() }()
+
+	if _, err := scanner.Enqueue(makeTestInputWithScript(), 100001); err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// Waiting longer can only give more scans, of which it's allowed a few.
+	time.Sleep(200 * time.Millisecond)
+	if got := scans.Load(); got > 5 {
+		t.Fatalf("%d scans", got)
 	}
 }
