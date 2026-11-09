@@ -47,8 +47,6 @@ func searchOutputs(source searchSource, scripts [][]byte, from, to int32,
 		return scripts, nil
 	}
 	onBlock := func(block *wire.MsgBlock, hash *chainhash.Hash, height int32) (scanStep, bool) {
-		// A filter can match where the block has nothing, which then
-		// says nothing.
 		if !findBlockOutputs(block, hash, height, scripts, found) {
 			return scanStopped, false
 		}
@@ -58,7 +56,8 @@ func searchOutputs(source searchSource, scripts [][]byte, from, to int32,
 }
 
 // findBlockOutputs tells found of each transaction of the block that pays to one
-// of the scripts, and returns whether to go on.
+// of the scripts, and returns whether to go on.  A filter can match where the
+// block has nothing, which then tells found nothing.
 func findBlockOutputs(block *wire.MsgBlock, hash *chainhash.Hash, height int32,
 	scripts [][]byte, found func(FoundOutput) bool) bool {
 
