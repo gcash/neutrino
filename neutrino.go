@@ -181,6 +181,15 @@ type ServerPeer struct {
 	// than its score lets us without being banned.
 	mempoolScore connmgr.DynamicBanScore
 
+	// bytesIn counts the bytes read from the peer's connection as they
+	// arrive, those of a message not yet whole too, so that a peer slow to
+	// send a large block still shows it's there.
+	bytesIn atomic.Uint64
+
+	// lastRead is when the peer's connection last gave a byte, in Unix
+	// nanoseconds, or when it was made.
+	lastRead atomic.Int64
+
 	// The following map of subcribers is used to subscribe to messages
 	// from the peer. This allows broadcast to multiple subscribers at
 	// once, allowing for multiple queries to be going to multiple peers at
@@ -1536,8 +1545,51 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	}
 	sp.Peer = p
 	sp.connReq = c
-	sp.AssociateConnection(conn)
+	sp.associate(conn)
 	go s.peerDoneHandler(sp)
+}
+
+// countingConn is a connection that counts the bytes read from it, and keeps
+// when it last gave one.
+type countingConn struct {
+	net.Conn
+	read *atomic.Uint64
+	last *atomic.Int64
+}
+
+func (c countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.read.Add(uint64(n))
+		c.last.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// associate gives the peer its connection, counting the bytes it reads.
+func (sp *ServerPeer) associate(conn net.Conn) {
+	sp.lastRead.Store(time.Now().UnixNano())
+	sp.AssociateConnection(countingConn{Conn: conn, read: &sp.bytesIn, last: &sp.lastRead})
+}
+
+// triedSilently takes a query try of the peer that timed out, the bytes it had
+// read when it was asked, and the try's timeout.  A peer that sent nothing in
+// the try, nor for maxSilentQueryTries timeouts, is disconnected, as its
+// connection is most likely gone, as when a phone moves between networks,
+// which nothing else notices until the peer's idle timeout of 5 minutes.  It
+// goes by the time the peer was silent, not by the tries, so that queries
+// that time out on it at once, as for what it doesn't have yet, count once.
+func (sp *ServerPeer) triedSilently(bytesAtAsk uint64, timeout time.Duration) {
+	if sp.bytesIn.Load() != bytesAtAsk {
+		return
+	}
+	silent := time.Since(time.Unix(0, sp.lastRead.Load()))
+	if silent < maxSilentQueryTries*timeout {
+		return
+	}
+	log.Warnf("Peer %s sent nothing for %v, over %d query timeouts -- "+
+		"disconnecting", sp, silent.Round(time.Second), maxSilentQueryTries)
+	sp.Disconnect()
 }
 
 // peerDoneHandler handles peer disconnects by notifiying the server that it's

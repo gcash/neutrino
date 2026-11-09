@@ -227,7 +227,7 @@ func connectTestPeer(t *testing.T, s *ChainService, services wire.ServiceFlag,
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp.AssociateConnection(conn)
+	sp.associate(conn)
 	t.Cleanup(sp.Disconnect)
 
 	// The verack that hands the peer to the server follows the version.

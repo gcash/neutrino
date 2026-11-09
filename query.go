@@ -79,6 +79,11 @@ var _ QueryAccess = (*ChainService)(nil)
 // use, however much it keeps sending.  A peer gets a turn for each retry.
 const maxPeerQueryTimeouts = 10
 
+// maxSilentQueryTries is how many query timeouts a peer can be silent for, not
+// sending a byte while a try of a query times out on it, before it's
+// disconnected.
+const maxSilentQueryTries = 3
+
 // cfilterLock is the filter lock: a one-slot channel, so that a query that can
 // give up waits for it and for its caller at once, rather than polling.  Its zero
 // value is unlocked.
@@ -882,8 +887,10 @@ func queryChainServicePeers(
 
 	// ask asks a peer for its next try.
 	firstAsked := make(map[string]int)
+	var bytesAtAsk uint64
 	ask := func(peer *ServerPeer) {
 		queryPeer = peer
+		bytesAtAsk = peer.bytesIn.Load()
 		if _, ok := firstAsked[peer.Addr()]; !ok {
 			firstAsked[peer.Addr()] = len(firstAsked)
 		}
@@ -1012,6 +1019,7 @@ checkResponses:
 		case <-peerTimeout.C:
 			if queryPeer != nil {
 				queryPeer.unsubscribeRecvMsgs(subscription)
+				queryPeer.triedSilently(bytesAtAsk, qo.timeout)
 			}
 
 			// The next peer gets a turn of its own.

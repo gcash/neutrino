@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"bytes"
 	"compress/bzip2"
 	"encoding/binary"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -1003,7 +1005,7 @@ func silentPeersLater(t *testing.T, count, askings int) (*ChainService, []*Serve
 			t.Fatal(err)
 		}
 		local, remote := net.Pipe()
-		sp.AssociateConnection(local)
+		sp.associate(local)
 		go func() { _, _ = io.Copy(io.Discard, remote) }()
 		t.Cleanup(func() {
 			sp.Disconnect()
@@ -1460,6 +1462,143 @@ func TestQueryLateWordOnEarlierTry(t *testing.T) {
 	})
 }
 
+// TestQueryDropsSilentPeer ensures a peer that lets maxSilentQueryTries query
+// tries in a row time out without sending a byte is disconnected, as its
+// connection is most likely gone, and that one sending a message slowly, which
+// isn't whole when the tries time out, isn't. A phone's peer whose connection
+// went when the phone changed networks held its queries until the peer's idle
+// timeout of 5 minutes.
+func TestQueryDropsSilentPeer(t *testing.T) {
+	t.Parallel()
+
+	// Wide, as a slow machine's timers fire late: a query one try short is
+	// silent a whole timeout less than the limit.
+	timeout := 300 * time.Millisecond
+	query := func(s *ChainService) {
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(timeout), NumRetries(maxSilentQueryTries),
+		)
+	}
+
+	t.Run("silent", func(t *testing.T) {
+		// The query disconnects it before it returns, which is long
+		// before the peer's handshake timeout would.
+		s, peers := silentPeers(t, 1)
+		query(s)
+		if peers[0].Connected() {
+			t.Fatal("the silent peer is still connected")
+		}
+	})
+
+	t.Run("one try short", func(t *testing.T) {
+		s, peers := silentPeers(t, 1)
+		peers[0].lastRead.Store(time.Now().UnixNano())
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(timeout), NumRetries(maxSilentQueryTries-1),
+		)
+		if !peers[0].Connected() {
+			t.Fatal("a peer silent for fewer tries was disconnected")
+		}
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		// Queries that time out on the peer at once, as for what it
+		// doesn't have yet, count as one timeout of silence.
+		s, peers := silentPeers(t, 1)
+		peers[0].lastRead.Store(time.Now().UnixNano())
+		var wg sync.WaitGroup
+		for range maxSilentQueryTries {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				queryChainServicePeers(
+					s, wire.NewMsgPing(1),
+					func(*ServerPeer, wire.Message, chan<- struct{}) {},
+					Timeout(timeout), NumRetries(1),
+				)
+			}()
+		}
+		wg.Wait()
+		if !peers[0].Connected() {
+			t.Fatal("queries that timed out at once disconnected the peer")
+		}
+	})
+
+	t.Run("slow", func(t *testing.T) {
+		s := &ChainService{
+			quit:         make(chan struct{}),
+			query:        make(chan interface{}),
+			blockManager: &blockManager{},
+		}
+		t.Cleanup(func() { close(s.quit) })
+		sp := newServerPeer(s, false)
+		var err error
+		sp.Peer, err = peer.NewOutboundPeer(
+			&peer.Config{ChainParams: &chaincfg.SimNetParams},
+			"127.0.0.1:18200",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local, remote := net.Pipe()
+		sp.associate(local)
+		t.Cleanup(func() {
+			sp.Disconnect()
+			_ = remote.Close()
+		})
+		go func() { _, _ = io.Copy(io.Discard, remote) }()
+		s.blockManager.syncPeer = sp
+		go func() {
+			for {
+				select {
+				case query := <-s.query:
+					query.(getPeersMsg).reply <- []*ServerPeer{sp}
+				case <-s.quit:
+					return
+				}
+			}
+		}()
+
+		// The header of a large block, then a byte of it now and then,
+		// as over a slow link, so the peer never has all of it.
+		var header bytes.Buffer
+		_ = binary.Write(&header, binary.LittleEndian, uint32(chaincfg.SimNetParams.Net))
+		command := make([]byte, 12)
+		copy(command, wire.CmdBlock)
+		header.Write(command)
+		_ = binary.Write(&header, binary.LittleEndian, uint32(1<<20))
+		header.Write(make([]byte, 4))
+		stop := make(chan struct{})
+		sent := make(chan struct{})
+		go func() {
+			defer close(sent)
+			if _, err := remote.Write(header.Bytes()); err != nil {
+				return
+			}
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(timeout / 4):
+				}
+				if _, err := remote.Write([]byte{0}); err != nil {
+					return
+				}
+			}
+		}()
+		query(s)
+		close(stop)
+		<-sent
+		if !sp.Connected() {
+			t.Fatal("a peer slowly sending a message was disconnected")
+		}
+	})
+}
+
 // TestQueriesEndAtQueryQuit ensures the query of every peer and the batch query end
 // when the caller gives up, as the query of one peer at a time does, rather than at
 // their timeouts.
@@ -1532,7 +1671,7 @@ func peerTurnOrder(t *testing.T, syncPeer int) []int {
 			t.Fatal(err)
 		}
 		local, remote := net.Pipe()
-		sp.AssociateConnection(local)
+		sp.associate(local)
 		go func() {
 			net := chaincfg.SimNetParams.Net
 			for {
