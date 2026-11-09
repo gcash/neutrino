@@ -1426,6 +1426,42 @@ func TestQueryLateWordOnEarlierTry(t *testing.T) {
 	<-done
 }
 
+// TestQueriesEndAtQueryQuit ensures the query of every peer and the batch query end
+// when the caller gives up, as the query of one peer at a time does, rather than at
+// their timeouts.
+func TestQueriesEndAtQueryQuit(t *testing.T) {
+	t.Parallel()
+
+	queries := map[string]func(s *ChainService, quit <-chan struct{}){
+		"every peer": func(s *ChainService, quit <-chan struct{}) {
+			s.queryAllPeers(wire.NewMsgPing(1),
+				func(*ServerPeer, wire.Message, chan<- struct{}, chan<- struct{}) {},
+				Timeout(time.Hour), QueryQuit(quit))
+		},
+		"batch": func(s *ChainService, quit <-chan struct{}) {
+			queryChainServiceBatch(s, []wire.Message{wire.NewMsgPing(1)},
+				func(*ServerPeer, wire.Message, wire.Message) bool { return false },
+				nil, Timeout(time.Hour), QueryQuit(quit))
+		},
+	}
+	for name, query := range queries {
+		s, _ := silentPeers(t, 2)
+		quit := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			query(s, quit)
+			close(done)
+		}()
+		time.Sleep(100 * time.Millisecond)
+		close(quit)
+		select {
+		case <-done:
+		case <-time.After(time.Minute):
+			t.Fatalf("the %s query didn't end when the caller gave up", name)
+		}
+	}
+}
+
 // TestQueryTakesTurnsAmongPeers ensures each peer has a try before any has a second,
 // the sync peer first, wherever the list has it, so that a peer that keeps a query
 // for its whole turn doesn't keep it for all its tries before another is asked.

@@ -346,6 +346,23 @@ func queryChainServiceBatch(
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
 
+	// QueryQuit ends the query as queryQuit does.
+	if qo.quit != nil {
+		stop := make(chan struct{})
+		finished := make(chan struct{})
+		defer close(finished)
+		go func(queryQuit, quit <-chan struct{}) {
+			select {
+			case <-queryQuit:
+			case <-quit:
+			case <-finished:
+				return
+			}
+			close(stop)
+		}(queryQuit, qo.quit)
+		queryQuit = stop
+	}
+
 	// Shared state between this goroutine and the per-peer goroutines.
 	queryStates := make([]uint32, len(queryMsgs))
 
@@ -704,6 +721,8 @@ func (s *ChainService) queryAllPeers(
 					nil, qo.encoding)
 				select {
 				case <-queryQuit:
+					return
+				case <-qo.quit:
 					return
 				case <-s.quit:
 					return
