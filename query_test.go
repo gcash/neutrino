@@ -823,14 +823,21 @@ func TestLockCFilterWaits(t *testing.T) {
 	}
 }
 
-// TestCFilterLock ensures the filter lock's zero value is unlocked, that it can be
-// taken again once freed, and that freeing it while free panics, as a mutex's does.
+// TestCFilterLock ensures the filter lock's zero value is unlocked, that it holds
+// its slot's value while taken and none once freed, that it can be taken again,
+// and that freeing it while free panics, as a mutex's does.
 func TestCFilterLock(t *testing.T) {
 	var l cfilterLock
-	l.Lock()
-	l.Unlock()
-	l.Lock()
-	l.Unlock()
+	for range 2 {
+		l.Lock()
+		if len(l.ch()) != 1 {
+			t.Fatal("a taken lock holds nothing")
+		}
+		l.Unlock()
+		if len(l.ch()) != 0 {
+			t.Fatal("a freed lock still holds its value")
+		}
+	}
 	defer func() {
 		if recover() == nil {
 			t.Fatal("freed a free lock")
