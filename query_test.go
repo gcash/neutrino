@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -1307,4 +1308,103 @@ func TestQueryEndsChattyPeersTurn(t *testing.T) {
 	case <-time.After(time.Minute):
 		t.Fatal("a peer's messages kept the query going")
 	}
+}
+
+// TestQueryTakesTurnsAmongPeers ensures each peer has a try before any has a second,
+// the sync peer first, wherever the list has it, so that a peer that keeps a query
+// for its whole turn doesn't keep it for all its tries before another is asked.
+func TestQueryTakesTurnsAmongPeers(t *testing.T) {
+	t.Parallel()
+
+	for syncPeer, want := range [][]int{{0, 1, 0, 1}, {1, 0, 1, 0}} {
+		if order := peerTurnOrder(t, syncPeer); !slices.Equal(order, want) {
+			t.Fatalf("with peer %d the sync peer, peers asked in the order %v, "+
+				"want %v", syncPeer, order, want)
+		}
+	}
+}
+
+// peerTurnOrder returns the order in which two peers that never answer are asked,
+// with two tries each, the one at syncPeer the sync peer.
+func peerTurnOrder(t *testing.T, syncPeer int) []int {
+	t.Helper()
+	s := &ChainService{
+		quit:         make(chan struct{}),
+		query:        make(chan interface{}),
+		blockManager: &blockManager{},
+	}
+	asked := make(chan int, 16)
+	var peers []*ServerPeer
+	for i := range 2 {
+		sp := newServerPeer(s, false)
+		var err error
+		sp.Peer, err = peer.NewOutboundPeer(
+			&peer.Config{ChainParams: &chaincfg.SimNetParams},
+			fmt.Sprintf("127.0.0.1:%d", 18100+10*syncPeer+i),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local, remote := net.Pipe()
+		sp.AssociateConnection(local)
+		go func() {
+			net := chaincfg.SimNetParams.Net
+			for {
+				msg, _, err := wire.ReadMessage(remote, wire.ProtocolVersion, net)
+				if err != nil {
+					return
+				}
+				switch msg := msg.(type) {
+				case *wire.MsgVersion:
+					// Answer the handshake, so that the peer sends what's
+					// queued.
+					reply := wire.NewMsgVersion(&msg.AddrMe, &msg.AddrYou,
+						msg.Nonce+1, 0)
+					reply.ProtocolVersion = int32(wire.ProtocolVersion)
+					if wire.WriteMessage(remote, reply, wire.ProtocolVersion, net) != nil ||
+						wire.WriteMessage(remote, wire.NewMsgVerAck(),
+							wire.ProtocolVersion, net) != nil {
+
+						return
+					}
+				case *wire.MsgPing:
+					asked <- i
+				}
+			}
+		}()
+		t.Cleanup(func() {
+			sp.Disconnect()
+			_ = remote.Close()
+		})
+		peers = append(peers, sp)
+	}
+	s.blockManager.syncPeer = peers[syncPeer]
+	go func() {
+		for {
+			select {
+			case query := <-s.query:
+				query.(getPeersMsg).reply <- peers
+			case <-s.quit:
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { close(s.quit) })
+
+	queryChainServicePeers(
+		s, wire.NewMsgPing(1),
+		func(*ServerPeer, wire.Message, chan<- struct{}) {},
+		Timeout(200*time.Millisecond), NumRetries(2),
+		PeerConnectTimeout(time.Millisecond),
+	)
+	var order []int
+	for len(order) < 4 {
+		select {
+		case i := <-asked:
+			order = append(order, i)
+		case <-time.After(time.Minute):
+			t.Fatalf("peers asked %v", order)
+		}
+	}
+	return order
 }

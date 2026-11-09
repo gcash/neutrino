@@ -788,9 +788,11 @@ func queryChainServicePeers(
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
 
-	// We get an initial view of our peers, to be updated each time a peer
-	// query times out.
-	queryPeer := s.blockManager.SyncPeer()
+	// The sync peer is asked first, then each peer in turn: a peer gets
+	// its next try once every other has had as many, so that one that
+	// keeps the query for its whole turn doesn't hold it for all its
+	// tries before another is asked.
+	var queryPeer *ServerPeer
 	peerTries := make(map[string]uint8)
 
 	// This will be state used by the peer query goroutine.
@@ -824,38 +826,56 @@ func queryChainServicePeers(
 	// has peers left to try.
 	connectionTicker := connectionTimeout.C
 
-	// askNextPeer asks the next peer that's connected, if any has tries left.
+	// ask asks a peer for its next try.
+	firstAsked := make(map[string]int)
+	ask := func(peer *ServerPeer) {
+		queryPeer = peer
+		if _, ok := firstAsked[peer.Addr()]; !ok {
+			firstAsked[peer.Addr()] = len(firstAsked)
+		}
+		peerTries[peer.Addr()]++
+		peer.subscribeRecvMsg(subscription)
+		peer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
+	}
+
+	// askNextPeer asks the connected peer with tries left that was tried
+	// the least, and of those tried as little, the one first asked
+	// earliest, or else the first listed, so that each round of tries goes
+	// in the order of the first.
 	askNextPeer := func() {
 		queryPeer = nil
+		rank := func(peer *ServerPeer) int {
+			if order, ok := firstAsked[peer.Addr()]; ok {
+				return order
+			}
+			return len(firstAsked)
+		}
+		var next *ServerPeer
+		var fewest uint8
 		for _, peer := range s.Peers() {
-			// If the peer is no longer connected, we'll skip them.
 			if !peer.Connected() {
 				continue
 			}
-
-			// If we've yet to try this peer, we'll make sure to do
-			// so. If we've exceeded the number of tries we should
-			// retry this peer, then we'll skip them.
-			numTries, ok := peerTries[peer.Addr()]
-			if ok && numTries >= qo.numRetries {
+			numTries := peerTries[peer.Addr()]
+			if numTries >= qo.numRetries {
 				continue
 			}
+			if next == nil || numTries < fewest ||
+				numTries == fewest && rank(peer) < rank(next) {
 
-			queryPeer = peer
-
-			// Found a peer we can query.
-			peerTries[queryPeer.Addr()]++
-			queryPeer.subscribeRecvMsg(subscription)
-			queryPeer.QueueMessageWithEncoding(
-				queryMsg, nil, qo.encoding,
-			)
-			break
+				next, fewest = peer, numTries
+			}
+		}
+		if next != nil {
+			ask(next)
 		}
 	}
-	if queryPeer != nil {
-		peerTries[queryPeer.Addr()]++
-		queryPeer.subscribeRecvMsg(subscription)
-		queryPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
+
+	// The sync peer goes first without asking for the list of peers,
+	// which the peer handler answers, as the query can run where that
+	// waits.
+	if syncPeer := s.blockManager.SyncPeer(); syncPeer != nil {
+		ask(syncPeer)
 	} else {
 		askNextPeer()
 	}
