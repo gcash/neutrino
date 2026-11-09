@@ -252,6 +252,13 @@ func (s *UtxoScanner) batchManager() {
 		default:
 		}
 
+		// What was asked before the scan is in it, so only a request that
+		// comes after wakes a wait for the chain.
+		select {
+		case <-s.enqueued:
+		default:
+		}
+
 		// Initiate a scan, starting from the birth height of the
 		// least-height request currently in the queue.
 		err := s.scanFromHeight(req.BirthHeight)
