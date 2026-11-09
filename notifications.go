@@ -222,6 +222,17 @@ func (s *ChainService) Peers() []*ServerPeer {
 	}
 }
 
+// DisconnectPeers drops every peer, so that new connections are made at once,
+// as after the device moved to another network: the connections of the one
+// before can be gone without either side being told, which nothing notices
+// until a peer's idle timeout of 5 minutes.  Persistent peers are connected
+// again, and the others replaced, as for any peer that disconnects.
+func (s *ChainService) DisconnectPeers() {
+	for _, sp := range s.Peers() {
+		sp.Disconnect()
+	}
+}
+
 // DisconnectNodeByAddr disconnects a peer by target address. Both outbound and
 // inbound nodes will be searched for the target node. An error message will
 // be returned if the peer was not found.

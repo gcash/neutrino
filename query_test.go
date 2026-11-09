@@ -1599,6 +1599,19 @@ func TestQueryDropsSilentPeer(t *testing.T) {
 	})
 }
 
+// TestDisconnectPeers ensures DisconnectPeers drops every peer.
+func TestDisconnectPeers(t *testing.T) {
+	t.Parallel()
+
+	s, peers := silentPeers(t, 3)
+	s.DisconnectPeers()
+	for i, sp := range peers {
+		if sp.Connected() {
+			t.Errorf("peer %d is still connected", i)
+		}
+	}
+}
+
 // TestQueriesEndAtQueryQuit ensures the query of every peer and the batch query end
 // when the caller gives up, as the query of one peer at a time does, rather than at
 // their timeouts.
