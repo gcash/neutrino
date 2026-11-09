@@ -27,10 +27,14 @@ type FoundOutput struct {
 //
 // found is called with each transaction that pays to one of the scripts, in the
 // order of their blocks and then within each block, and returns whether to go
-// on.  A search that found returns false for ends at that block.
+// on.  A search that found returns false for ends at that block, and returns
+// its height, though the block's later transactions weren't looked at and
+// progress isn't called with it.
 //
-// progress and the height returned are as for SearchSpends.  A search that quit
-// closes, or that the service shuts down, returns ErrSearchCancelled.
+// progress and the height returned are otherwise as for SearchSpends, and so
+// are what the filters can hide and what a reorganization while it runs can do.
+// A search that quit closes, or that the service shuts down, returns
+// ErrSearchCancelled.
 func (s *ChainService) SearchOutputs(scripts [][]byte, from, to int32,
 	found func(FoundOutput) bool, progress func(height int32),
 	quit <-chan struct{}) (int32, error) {

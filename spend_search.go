@@ -37,9 +37,17 @@ type FoundSpend struct {
 // progress, if it isn't nil, is called with each height that is done.  The
 // height the search got to is also returned, with an error too, and a search
 // resumes from the height after it, in its direction.  It is from less one step
-// if no height was finished.  An outpoint that wasn't found was unspent in the
-// range.  A search that quit closes, or that the service shuts down, returns
-// ErrSearchCancelled.
+// if no height was finished, and short of to with no error if no outpoint was
+// left to watch.  A search that quit closes, or that the service shuts down,
+// returns ErrSearchCancelled.
+//
+// An outpoint that wasn't found was unspent in the range as far as the filters
+// tell, which is as far as the filter headers that the peers agreed on are
+// right: peers that agree on wrong ones can hide a spend until a peer that
+// disagrees has them rolled back.  The search follows the chain as it is at
+// each height, so a reorganization while it runs can leave blocks it passed off
+// the chain; a caller checks that the chain didn't change, as by the hash of the
+// block it got to, before it counts the range as searched.
 func (s *ChainService) SearchSpends(outpoints []wire.OutPoint, from, to int32,
 	found func(FoundSpend) []wire.OutPoint, progress func(height int32),
 	quit <-chan struct{}) (int32, error) {
