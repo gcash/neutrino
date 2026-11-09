@@ -79,8 +79,35 @@ var _ QueryAccess = (*ChainService)(nil)
 // use, however much it keeps sending.  A peer gets a turn for each retry.
 const maxPeerQueryTimeouts = 10
 
-// cfilterLockPoll is how often a query that can give up tries the filter lock.
-const cfilterLockPoll = 50 * time.Millisecond
+// cfilterLock is the filter lock: a one-slot channel, so that a query that can
+// give up waits for it and for its caller at once, rather than polling.  Its zero
+// value is unlocked.
+type cfilterLock struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+// ch returns the lock's slot, which holds a value while it's locked.
+func (l *cfilterLock) ch() chan struct{} {
+	l.once.Do(func() {
+		l.slot = make(chan struct{}, 1)
+	})
+	return l.slot
+}
+
+// Lock waits for the lock and takes it.
+func (l *cfilterLock) Lock() {
+	l.ch() <- struct{}{}
+}
+
+// Unlock frees the lock, which must be held, as a mutex must.
+func (l *cfilterLock) Unlock() {
+	select {
+	case <-l.ch():
+	default:
+		panic("neutrino: unlock of the unlocked filter lock")
+	}
+}
 
 // queries are a set of options that can be modified per-query, unlike global
 // options.
@@ -1071,16 +1098,14 @@ func (s *ChainService) lockCFilter(options ...QueryOption) bool {
 		s.mtxCFilter.Lock()
 		return true
 	}
-	for !s.mtxCFilter.TryLock() {
-		select {
-		case <-qo.quit:
-			return false
-		case <-s.quit:
-			return false
-		case <-time.After(cfilterLockPoll):
-		}
+	select {
+	case s.mtxCFilter.ch() <- struct{}{}:
+		return true
+	case <-qo.quit:
+		return false
+	case <-s.quit:
+		return false
 	}
-	return true
 }
 
 // queryEnded returns whether a query's caller gave up or we're shutting down.

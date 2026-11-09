@@ -634,7 +634,7 @@ type ChainService struct {
 	banStore             banman.Store
 
 	// TODO: Add a map for more granular exclusion?
-	mtxCFilter sync.Mutex
+	mtxCFilter cfilterLock
 
 	// filterGenMtx guards filterGen, which counts the rollbacks of the
 	// filter headers. A filter query keeps or returns no filter once the

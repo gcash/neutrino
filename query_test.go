@@ -809,7 +809,7 @@ func TestLockCFilterWaits(t *testing.T) {
 	go func() { got <- s.lockCFilter(QueryQuit(make(chan struct{}))) }()
 
 	// Long enough for a wait that gives up to show itself.
-	time.Sleep(cfilterLockPoll * 2)
+	time.Sleep(100 * time.Millisecond)
 	s.mtxCFilter.Unlock()
 	select {
 	case ok := <-got:
@@ -819,6 +819,22 @@ func TestLockCFilterWaits(t *testing.T) {
 	case <-time.After(time.Minute):
 		t.Fatal("didn't take a lock that's free")
 	}
+}
+
+// TestCFilterLock ensures the filter lock's zero value is unlocked, that it can be
+// taken again once freed, and that freeing it while free panics, as a mutex's does.
+func TestCFilterLock(t *testing.T) {
+	var l cfilterLock
+	l.Lock()
+	l.Unlock()
+	l.Lock()
+	l.Unlock()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("freed a free lock")
+		}
+	}()
+	l.Unlock()
 }
 
 // TestGetCFilterShuttingDown ensures a query waiting for the lock says why it left.
