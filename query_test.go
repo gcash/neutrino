@@ -1357,6 +1357,75 @@ func TestQueryTurnIgnoresLastPeer(t *testing.T) {
 	}
 }
 
+// TestQueryLateWordOnEarlierTry ensures a peer's word that it lacks what was asked,
+// coming in its second try after its first timed out, doesn't end the second, which
+// its own word then ends.
+func TestQueryLateWordOnEarlierTry(t *testing.T) {
+	t.Parallel()
+
+	s, peers := silentPeers(t, 2)
+	wanted := wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{1})
+	timeout := 300 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(timeout), NumRetries(2),
+			peerLacks(func(msg wire.Message) bool {
+				return notFoundOf(msg, wanted)
+			}),
+		)
+		close(done)
+	}()
+	subscribed := func(sp *ServerPeer) *spMsgSubscription {
+		sp.mtxSubscribers.RLock()
+		defer sp.mtxSubscribers.RUnlock()
+		for found := range sp.recvSubscribers {
+			return &found
+		}
+		return nil
+	}
+	waitFor := func(sp *ServerPeer) *spMsgSubscription {
+		t.Helper()
+		deadline := time.Now().Add(time.Minute)
+		for {
+			if found := subscribed(sp); found != nil {
+				return found
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the peer wasn't asked")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	notFound := wire.NewMsgNotFound()
+	if err := notFound.AddInvVect(wanted); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first peer's and the second's first tries time out.
+	waitFor(peers[0])
+	waitFor(peers[1])
+	first := waitFor(peers[0])
+
+	// In the first peer's second try, its word on the first try comes in, and
+	// its turn goes on, as the peer keeps sending.
+	first.msgChan <- spMsg{sp: peers[0], msg: notFound}
+	for range 3 * timeout / (50 * time.Millisecond) {
+		first.msgChan <- spMsg{sp: peers[0], msg: wire.NewMsgPing(2)}
+		if subscribed(peers[1]) != nil {
+			t.Fatal("a word on the first try ended the second")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Its word on the second try ends it.
+	first.msgChan <- spMsg{sp: peers[0], msg: notFound}
+	waitFor(peers[1])
+	<-done
+}
+
 // TestQueryTakesTurnsAmongPeers ensures each peer has a try before any has a second,
 // the sync peer first, wherever the list has it, so that a peer that keeps a query
 // for its whole turn doesn't keep it for all its tries before another is asked.
