@@ -181,14 +181,23 @@ func findBlockSpends(block *wire.MsgBlock, hash *chainhash.Hash, height int32,
 	watched map[wire.OutPoint]struct{}, found func(FoundSpend) []wire.OutPoint,
 	follow bool) bool {
 
-	spends := make(map[wire.OutPoint]*blockSpend)
+	// Most blocks a filter matches spend nothing watched, as a filter
+	// matches falsely too, so the index waits for a spend.
 	var pending []wire.OutPoint
 	for _, tx := range block.Transactions {
-		for i, txIn := range tx.TxIn {
-			spends[txIn.PreviousOutPoint] = &blockSpend{tx: tx, input: uint32(i)}
+		for _, txIn := range tx.TxIn {
 			if _, ok := watched[txIn.PreviousOutPoint]; ok {
 				pending = append(pending, txIn.PreviousOutPoint)
 			}
+		}
+	}
+	if len(pending) == 0 {
+		return false
+	}
+	spends := make(map[wire.OutPoint]*blockSpend)
+	for _, tx := range block.Transactions {
+		for i, txIn := range tx.TxIn {
+			spends[txIn.PreviousOutPoint] = &blockSpend{tx: tx, input: uint32(i)}
 		}
 	}
 
