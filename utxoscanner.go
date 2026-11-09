@@ -121,6 +121,10 @@ type UtxoScanner struct {
 	// enqueued wakes the scanner from waiting on a request it couldn't take
 	// when a new one comes, which it may be able to.
 	enqueued chan struct{}
+
+	// waiting, if set, is called as the scanner starts to wait on such a
+	// request, so that a test can enqueue another while it does.
+	waiting func()
 }
 
 // NewUtxoScanner creates a new instance of UtxoScanner using the given chain
@@ -273,6 +277,9 @@ func (s *UtxoScanner) batchManager() {
 		stuck := !s.pq.IsEmpty() && s.pq.Peek() == req
 		s.cv.L.Unlock()
 		if stuck {
+			if s.waiting != nil {
+				s.waiting()
+			}
 			select {
 			case <-time.After(utxoScanRetryWait):
 			case <-s.enqueued:

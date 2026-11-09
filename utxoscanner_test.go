@@ -957,28 +957,32 @@ func TestUtxoScannerWakesForNewRequest(t *testing.T) {
 	mockChainClient.SetBlock(&block100000Hash, bchutil.NewBlock(&Block100000))
 	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
 
-	var scans atomic.Int32
 	scanner := NewUtxoScanner(&UtxoScannerConfig{
-		GetBlock:     mockChainClient.GetBlockFromNetwork,
-		GetBlockHash: mockChainClient.GetBlockHash,
-		BestSnapshot: func() (*waddrmgr.BlockStamp, error) {
-			scans.Add(1)
-			return mockChainClient.BestSnapshot()
-		},
+		GetBlock:           mockChainClient.GetBlockFromNetwork,
+		GetBlockHash:       mockChainClient.GetBlockHash,
+		BestSnapshot:       mockChainClient.BestSnapshot,
 		BlockFilterMatches: mockChainClient.blockFilterMatches,
 	})
+	// The second request comes once the scanner waits on the first, which
+	// it can't take, so that only the wake can end the wait before its
+	// hour.
+	waiting := make(chan struct{}, 1)
+	scanner.waiting = func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	}
 	_ = scanner.Start()
 	defer func() { _ = scanner.Stop() }()
 
 	if _, err := scanner.Enqueue(makeTestInputWithScript(), 100001); err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-	deadline := time.Now().Add(time.Minute)
-	for scans.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the scanner didn't try the first request")
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-waiting:
+	case <-time.After(time.Minute):
+		t.Fatal("the scanner didn't wait on the first request")
 	}
 
 	req, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
