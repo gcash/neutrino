@@ -942,3 +942,60 @@ func TestUtxoScannerWaitsForHeight(t *testing.T) {
 		t.Fatalf("%d scans", got)
 	}
 }
+
+// TestUtxoScannerWakesForNewRequest ensures a request that comes while the scanner
+// waits on one for a height the chain hasn't reached is answered then, rather than
+// after the wait.
+func TestUtxoScannerWakesForNewRequest(t *testing.T) {
+	wait := utxoScanRetryWait
+	utxoScanRetryWait = time.Hour
+	defer func() { utxoScanRetryWait = wait }()
+
+	mockChainClient := NewMockChainClient()
+	block100000Hash := Block100000.BlockHash()
+	mockChainClient.SetBlockHash(100000, &block100000Hash)
+	mockChainClient.SetBlock(&block100000Hash, bchutil.NewBlock(&Block100000))
+	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
+
+	var scans atomic.Int32
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock:     mockChainClient.GetBlockFromNetwork,
+		GetBlockHash: mockChainClient.GetBlockHash,
+		BestSnapshot: func() (*waddrmgr.BlockStamp, error) {
+			scans.Add(1)
+			return mockChainClient.BestSnapshot()
+		},
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
+	})
+	_ = scanner.Start()
+	defer func() { _ = scanner.Stop() }()
+
+	if _, err := scanner.Enqueue(makeTestInputWithScript(), 100001); err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for scans.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the scanner didn't try the first request")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	req, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	got := make(chan error, 1)
+	go func() {
+		_, err := req.Result(nil)
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("unable to complete the scan: %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("the new request waited for the scanner's wait")
+	}
+}

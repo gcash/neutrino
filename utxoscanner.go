@@ -78,8 +78,9 @@ func (r *GetUtxoRequest) Result(cancel <-chan struct{}) (*SpendReport, error) {
 }
 
 // utxoScanRetryWait is how long the scanner waits before trying a request that
-// a scan left in the queue.
-const utxoScanRetryWait = time.Second
+// a scan left in the queue, unless a new request comes first, a variable for the
+// tests.
+var utxoScanRetryWait = time.Second
 
 // UtxoScannerConfig exposes configurable methods for interacting with the blockchain.
 type UtxoScannerConfig struct {
@@ -116,6 +117,10 @@ type UtxoScanner struct {
 	wg       sync.WaitGroup
 	quit     chan struct{}
 	shutdown chan struct{}
+
+	// enqueued wakes the scanner from waiting on a request it couldn't take
+	// when a new one comes, which it may be able to.
+	enqueued chan struct{}
 }
 
 // NewUtxoScanner creates a new instance of UtxoScanner using the given chain
@@ -125,6 +130,7 @@ func NewUtxoScanner(cfg *UtxoScannerConfig) *UtxoScanner {
 		cfg:      cfg,
 		quit:     make(chan struct{}),
 		shutdown: make(chan struct{}),
+		enqueued: make(chan struct{}, 1),
 	}
 	scanner.cv = sync.NewCond(&scanner.mu)
 
@@ -199,6 +205,10 @@ func (s *UtxoScanner) Enqueue(input *InputWithScript,
 
 	s.cv.L.Unlock()
 	s.cv.Signal()
+	select {
+	case s.enqueued <- struct{}{}:
+	default:
+	}
 
 	return req, nil
 }
@@ -258,6 +268,7 @@ func (s *UtxoScanner) batchManager() {
 		if stuck {
 			select {
 			case <-time.After(utxoScanRetryWait):
+			case <-s.enqueued:
 			case <-s.quit:
 				return
 			}
