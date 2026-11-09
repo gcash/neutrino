@@ -930,8 +930,11 @@ checkResponses:
 
 			// Each time we receive a response from the current
 			// peer, we'll reset the main peer timeout as they're
-			// being responsive, unless their turn is over.
-			turn.responded()
+			// being responsive, unless their turn is over.  What
+			// a peer before it still sends gives it no more time.
+			if sm.sp == queryPeer {
+				turn.responded()
+			}
 
 			// A peer's own word ends its turn. What the last peer
 			// said is no word on this one.

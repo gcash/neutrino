@@ -1310,6 +1310,53 @@ func TestQueryEndsChattyPeersTurn(t *testing.T) {
 	}
 }
 
+// TestQueryTurnIgnoresLastPeer ensures what a peer whose turn is over still sends
+// doesn't keep the next peer's turn going, which ends after its timeout rather than
+// at its deadline, ten timeouts on.
+func TestQueryTurnIgnoresLastPeer(t *testing.T) {
+	t.Parallel()
+
+	s, peers := silentPeers(t, 2)
+	timeout := 300 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		queryChainServicePeers(
+			s, wire.NewMsgPing(1),
+			func(*ServerPeer, wire.Message, chan<- struct{}) {},
+			Timeout(timeout), NumRetries(1),
+		)
+		close(done)
+	}()
+
+	// Wait for the second peer's turn.
+	var second *spMsgSubscription
+	for second == nil {
+		peers[1].mtxSubscribers.RLock()
+		for found := range peers[1].recvSubscribers {
+			second = &found
+		}
+		peers[1].mtxSubscribers.RUnlock()
+		select {
+		case <-done:
+			t.Fatal("the query ended before the second peer's turn")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	start := time.Now()
+	for {
+		select {
+		case second.msgChan <- spMsg{sp: peers[0], msg: wire.NewMsgPing(2)}:
+		case <-done:
+			if took := time.Since(start); took > 5*timeout {
+				t.Fatalf("the first peer's messages kept the second's turn "+
+					"for %v", took)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestQueryTakesTurnsAmongPeers ensures each peer has a try before any has a second,
 // the sync peer first, wherever the list has it, so that a peer that keeps a query
 // for its whole turn doesn't keep it for all its tries before another is asked.
