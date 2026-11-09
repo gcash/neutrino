@@ -2,7 +2,6 @@ package neutrino
 
 import (
 	"bytes"
-	"errors"
 
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
@@ -31,7 +30,7 @@ type FoundOutput struct {
 // on.  A search that found returns false for ends at that block.
 //
 // progress and the height returned are as for SearchSpends.  A search that quit
-// closes, or that the service shuts down, returns ErrSpendSearchCancelled.
+// closes, or that the service shuts down, returns ErrSearchCancelled.
 func (s *ChainService) SearchOutputs(scripts [][]byte, from, to int32,
 	found func(FoundOutput) bool, progress func(height int32),
 	quit <-chan struct{}) (int32, error) {
@@ -40,55 +39,22 @@ func (s *ChainService) SearchOutputs(scripts [][]byte, from, to int32,
 }
 
 // searchOutputs is SearchOutputs on a source.
-func searchOutputs(source spendSearchSource, scripts [][]byte, from, to int32,
+func searchOutputs(source searchSource, scripts [][]byte, from, to int32,
 	found func(FoundOutput) bool, progress func(height int32),
 	quit, shutdown <-chan struct{}) (int32, error) {
 
-	step, batch := int32(1), OptimisticBatch()
-	if from > to {
-		step, batch = -1, OptimisticReverseBatch()
+	entries := func() ([][]byte, error) {
+		return scripts, nil
 	}
-	reached := from - step
-	if len(scripts) == 0 {
-		return reached, nil
+	onBlock := func(block *wire.MsgBlock, hash *chainhash.Hash, height int32) (scanStep, bool) {
+		// A filter can match where the block has nothing, which then
+		// says nothing.
+		if !findBlockOutputs(block, hash, height, scripts, found) {
+			return scanStopped, false
+		}
+		return scanOn, false
 	}
-	for height := from; height != to+step; height += step {
-		select {
-		case <-quit:
-			return reached, ErrSpendSearchCancelled
-		case <-shutdown:
-			return reached, ErrSpendSearchCancelled
-		default:
-		}
-
-		hash, err := source.GetBlockHash(int64(height))
-		if err != nil {
-			return reached, err
-		}
-		matched, err := spendFilterMatches(source, hash, scripts, batch, QueryQuit(quit))
-		if err != nil {
-			return reached, stopped(err, quit, shutdown)
-		}
-		if matched {
-			block, err := source.GetBlock(*hash, QueryQuit(quit))
-			if err != nil {
-				return reached, stopped(err, quit, shutdown)
-			}
-			if block == nil {
-				return reached, errors.New("no block for a filter that matched")
-			}
-			// A filter can match where the block has nothing, which then
-			// says nothing.
-			if !findBlockOutputs(block.MsgBlock(), hash, height, scripts, found) {
-				return height, nil
-			}
-		}
-		reached = height
-		if progress != nil {
-			progress(height)
-		}
-	}
-	return reached, nil
+	return scanFilters(source, from, to, entries, onBlock, progress, quit, shutdown)
 }
 
 // findBlockOutputs tells found of each transaction of the block that pays to one

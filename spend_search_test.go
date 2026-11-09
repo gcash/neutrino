@@ -363,7 +363,7 @@ func TestSearchSpendsResume(t *testing.T) {
 		c.stop, c.stopAt = quit, 6
 		reached, err := searchSpends(c, []wire.OutPoint{a}, 10, 1, nil,
 			func(height int32) { done.Store(height) }, quit, nil)
-		if !errors.Is(err, ErrSpendSearchCancelled) || reached != 6 || done.Load() != 6 {
+		if !errors.Is(err, ErrSearchCancelled) || reached != 6 || done.Load() != 6 {
 			t.Fatalf("reached %d, progress %d, %v", reached, done.Load(), err)
 		}
 	})
@@ -373,11 +373,11 @@ func TestSearchSpendsResume(t *testing.T) {
 		quit := make(chan struct{})
 		close(quit)
 		reached, err := searchSpends(c, []wire.OutPoint{a}, 4, 10, nil, nil, quit, nil)
-		if !errors.Is(err, ErrSpendSearchCancelled) || reached != 3 {
+		if !errors.Is(err, ErrSearchCancelled) || reached != 3 {
 			t.Fatalf("reached %d, %v", reached, err)
 		}
 		reached, err = searchSpends(c, []wire.OutPoint{a}, 4, 1, nil, nil, quit, nil)
-		if !errors.Is(err, ErrSpendSearchCancelled) || reached != 5 {
+		if !errors.Is(err, ErrSearchCancelled) || reached != 5 {
 			t.Fatalf("reached %d, %v", reached, err)
 		}
 	})
@@ -387,7 +387,7 @@ func TestSearchSpendsResume(t *testing.T) {
 		shutdown := make(chan struct{})
 		close(shutdown)
 		_, err := searchSpends(c, []wire.OutPoint{a}, 1, 3, nil, nil, nil, shutdown)
-		if !errors.Is(err, ErrSpendSearchCancelled) {
+		if !errors.Is(err, ErrSearchCancelled) {
 			t.Fatal(err)
 		}
 	})
@@ -423,7 +423,7 @@ func TestSearchSpendsQuitDuringQuery(t *testing.T) {
 	c := &quitDuringQuery{spendTestChain: newSpendTestChain(t, 5, nil), quit: make(chan struct{})}
 	outpoint := wire.OutPoint{Hash: chainhash.Hash{1}}
 	_, err := searchSpends(c, []wire.OutPoint{outpoint}, 1, 3, nil, nil, c.quit, nil)
-	if !errors.Is(err, ErrSpendSearchCancelled) {
+	if !errors.Is(err, ErrSearchCancelled) {
 		t.Fatalf("got %v", err)
 	}
 }

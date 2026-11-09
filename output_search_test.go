@@ -128,7 +128,7 @@ func TestSearchOutputsResume(t *testing.T) {
 	quit := make(chan struct{})
 	c.stopAt, c.stop = 4, quit
 	reached, err = searchOutputs(c, [][]byte{scriptA}, 1, 10, nil, nil, quit, nil)
-	if !errors.Is(err, ErrSpendSearchCancelled) || reached != 4 {
+	if !errors.Is(err, ErrSearchCancelled) || reached != 4 {
 		t.Fatalf("reached %d, %v", reached, err)
 	}
 
@@ -141,7 +141,7 @@ func TestSearchOutputsResume(t *testing.T) {
 // TestSearchOutputsQuitDuringQuery ensures a query a closed quit ended cancels.
 func TestSearchOutputsQuitDuringQuery(t *testing.T) {
 	c := &quitDuringQuery{spendTestChain: newSpendTestChain(t, 5, nil), quit: make(chan struct{})}
-	if _, err := searchOutputs(c, [][]byte{scriptA}, 1, 3, nil, nil, c.quit, nil); !errors.Is(err, ErrSpendSearchCancelled) {
+	if _, err := searchOutputs(c, [][]byte{scriptA}, 1, 3, nil, nil, c.quit, nil); !errors.Is(err, ErrSearchCancelled) {
 		t.Fatalf("got %v", err)
 	}
 }
