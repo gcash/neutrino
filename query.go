@@ -843,8 +843,11 @@ func queryChainServicePeers(
 
 	// peerLacked counts the words of each peer that it lacks what was asked,
 	// one per try at most: a try that timed out can have its word come in the
-	// peer's next try, which only its own word ends.
+	// peer's next try, which only its own word ends.  That's only when its
+	// tries come one after another: after another peer's turn, a word on an
+	// earlier try came while nothing listened, and can no longer come.
 	peerLacked := make(map[string]uint8)
+	var lastAsked string
 
 	// This will be state used by the peer query goroutine.
 	queryQuit := make(chan struct{})
@@ -884,6 +887,10 @@ func queryChainServicePeers(
 		if _, ok := firstAsked[peer.Addr()]; !ok {
 			firstAsked[peer.Addr()] = len(firstAsked)
 		}
+		if lastAsked != peer.Addr() {
+			peerLacked[peer.Addr()] = peerTries[peer.Addr()]
+		}
+		lastAsked = peer.Addr()
 		peerTries[peer.Addr()]++
 		peer.subscribeRecvMsg(subscription)
 		peer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)

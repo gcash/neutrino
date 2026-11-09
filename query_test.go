@@ -1375,71 +1375,89 @@ func TestQueryTurnIgnoresLastPeer(t *testing.T) {
 
 // TestQueryLateWordOnEarlierTry ensures a peer's word that it lacks what was asked,
 // coming in its second try after its first timed out, doesn't end the second, which
-// its own word then ends.
+// TestQueryLateWordOnEarlierTry ensures a peer's word that it lacks what was asked
+// ends its turn only if it can be the word on that try: with a peer's tries one
+// after another, its word on the first can come in the second, which goes on,
+// while after another peer's turn, its first word ends its next try, as a word
+// on its earlier try came while nothing listened.
 func TestQueryLateWordOnEarlierTry(t *testing.T) {
 	t.Parallel()
 
-	s, peers := silentPeers(t, 2)
 	wanted := wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{1})
-	timeout := 300 * time.Millisecond
-	done := make(chan struct{})
-	go func() {
-		queryChainServicePeers(
-			s, wire.NewMsgPing(1),
-			func(*ServerPeer, wire.Message, chan<- struct{}) {},
-			Timeout(timeout), NumRetries(2),
-			peerLacks(func(msg wire.Message) bool {
-				return notFoundOf(msg, wanted)
-			}),
-		)
-		close(done)
-	}()
-	subscribed := func(sp *ServerPeer) *spMsgSubscription {
-		sp.mtxSubscribers.RLock()
-		defer sp.mtxSubscribers.RUnlock()
-		for found := range sp.recvSubscribers {
-			return &found
-		}
-		return nil
+	timeout := time.Second
+	notFound := wire.NewMsgNotFound()
+	if err := notFound.AddInvVect(wanted); err != nil {
+		t.Fatal(err)
+	}
+	query := func(s *ChainService) chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			queryChainServicePeers(
+				s, wire.NewMsgPing(1),
+				func(*ServerPeer, wire.Message, chan<- struct{}) {},
+				Timeout(timeout), NumRetries(2),
+				peerLacks(func(msg wire.Message) bool {
+					return notFoundOf(msg, wanted)
+				}),
+			)
+			close(done)
+		}()
+		return done
 	}
 	waitFor := func(sp *ServerPeer) *spMsgSubscription {
 		t.Helper()
 		deadline := time.Now().Add(time.Minute)
 		for {
-			if found := subscribed(sp); found != nil {
-				return found
+			sp.mtxSubscribers.RLock()
+			for found := range sp.recvSubscribers {
+				sp.mtxSubscribers.RUnlock()
+				return &found
 			}
+			sp.mtxSubscribers.RUnlock()
 			if time.Now().After(deadline) {
 				t.Fatal("the peer wasn't asked")
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}
-	notFound := wire.NewMsgNotFound()
-	if err := notFound.AddInvVect(wanted); err != nil {
-		t.Fatal(err)
-	}
 
-	// The first peer's and the second's first tries time out.
-	waitFor(peers[0])
-	waitFor(peers[1])
-	first := waitFor(peers[0])
+	t.Run("one after another", func(t *testing.T) {
+		s, peers := silentPeers(t, 1)
+		done := query(s)
 
-	// In the first peer's second try, its word on the first try comes in, and
-	// its turn goes on, as the peer keeps sending.
-	first.msgChan <- spMsg{sp: peers[0], msg: notFound}
-	for range 3 * timeout / (50 * time.Millisecond) {
-		first.msgChan <- spMsg{sp: peers[0], msg: wire.NewMsgPing(2)}
-		if subscribed(peers[1]) != nil {
+		// The first try times out, and halfway through the second, the
+		// word on the first comes in, which leaves the second to go on.
+		sub := waitFor(peers[0])
+		time.Sleep(timeout + timeout/2)
+		sub.msgChan <- spMsg{sp: peers[0], msg: notFound}
+		select {
+		case <-done:
 			t.Fatal("a word on the first try ended the second")
+		case <-time.After(timeout / 4):
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
 
-	// Its word on the second try ends it.
-	first.msgChan <- spMsg{sp: peers[0], msg: notFound}
-	waitFor(peers[1])
-	<-done
+		// Its word on the second try ends it.
+		sub.msgChan <- spMsg{sp: peers[0], msg: notFound}
+		<-done
+	})
+
+	t.Run("after another peer", func(t *testing.T) {
+		s, peers := silentPeers(t, 2)
+		done := query(s)
+
+		// The first peer's and the second's first tries time out. The first
+		// peer's word on its second try ends it at once.
+		waitFor(peers[0])
+		waitFor(peers[1])
+		second := waitFor(peers[0])
+		asked := time.Now()
+		second.msgChan <- spMsg{sp: peers[0], msg: notFound}
+		waitFor(peers[1])
+		if took := time.Since(asked); took >= timeout {
+			t.Fatalf("the word took %v to end the turn", took)
+		}
+		<-done
+	})
 }
 
 // TestQueriesEndAtQueryQuit ensures the query of every peer and the batch query end
