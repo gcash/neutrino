@@ -178,8 +178,9 @@ type ServerPeer struct {
 	quit     chan struct{}
 
 	// mempoolScore mirrors the ban score that the peer keeps for us, for
-	// our requests for its mempool, so that we never ask it once more
-	// than its score lets us without being banned.
+	// our requests for its mempool and for the leaves and proofs of a
+	// script filter's entry tree, so that we never ask it once more than
+	// its score lets us without being banned.
 	mempoolScore connmgr.DynamicBanScore
 
 	// bytesIn counts the bytes read from the peer's connection as they
