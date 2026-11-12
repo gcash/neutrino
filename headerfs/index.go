@@ -21,6 +21,10 @@ var (
 	// best known chain that we're synced to.
 	bitcoinTip = []byte("bitcoin")
 
+	// scriptFilterTip is the key which tracks the "tip" of the script
+	// filter header chain.
+	scriptFilterTip = []byte("script")
+
 	// regFilterTip is the key which tracks the "tip" of the regular
 	// compact filter header chain. The value of this key will be the
 	// current block hash of the best known chain that the headers for
@@ -58,6 +62,11 @@ const (
 	// RegularFilter is a header type that represents the basic filter
 	// header type for the filter header chain.
 	RegularFilter
+
+	// ScriptFilter is a header type that represents the headers of the
+	// script filter (filter type 1), which lists the scripts of the
+	// outputs a block creates and spends.
+	ScriptFilter
 )
 
 const (
@@ -163,6 +172,8 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 			tipKey = bitcoinTip
 		case RegularFilter:
 			tipKey = regFilterTip
+		case ScriptFilter:
+			tipKey = scriptFilterTip
 		default:
 			return fmt.Errorf("unknown index type: %v", h.indexType)
 		}
@@ -237,6 +248,8 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 			tipKey = bitcoinTip
 		case RegularFilter:
 			tipKey = regFilterTip
+		case ScriptFilter:
+			tipKey = scriptFilterTip
 		default:
 			return fmt.Errorf("unknown chain tip index type: %v", h.indexType)
 		}
@@ -286,6 +299,8 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, del bool) error {
 			tipKey = bitcoinTip
 		case RegularFilter:
 			tipKey = regFilterTip
+		case ScriptFilter:
+			tipKey = scriptFilterTip
 		default:
 			return fmt.Errorf("unknown index type: %v", h.indexType)
 		}

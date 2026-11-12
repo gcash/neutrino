@@ -33,7 +33,7 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 	case Block:
 		headerSize = 80
 
-	case RegularFilter:
+	case RegularFilter, ScriptFilter:
 		headerSize = 32
 
 	default:

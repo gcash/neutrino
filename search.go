@@ -133,7 +133,7 @@ func stopped(err error, quit, shutdown <-chan struct{}) error {
 func filterMatches(source searchSource, hash *chainhash.Hash, entries [][]byte,
 	options ...QueryOption) (bool, error) {
 
-	filter, err := source.GetCFilter(*hash, wire.GCSFilterRegular, options...)
+	filter, err := source.GetCFilter(*hash, filterTypeOf(source), options...)
 	if err != nil {
 		return false, err
 	}

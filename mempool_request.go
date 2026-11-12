@@ -190,7 +190,8 @@ func (r *mempoolRequester) attempt() {
 // mempool and their mempool, didn't disconnect right after a request, aren't
 // sitting out after one they didn't answer, and can take a request without
 // their ban score for us passing maxMempoolBanScore,
-// those with the lowest score first.
+// those with the lowest score first.  The score is only read here, as a first
+// filter; ask is what reserves it.
 func (r *mempoolRequester) candidates() []*ServerPeer {
 	type candidate struct {
 		sp    *ServerPeer
@@ -206,6 +207,9 @@ func (r *mempoolRequester) candidates() []*ServerPeer {
 		if sp.Services()&services != services {
 			continue
 		}
+		// Advisory only.  This skips a peer that already has no room.
+		// The score can rise before the request is sent, and ask is
+		// what checks it again and counts the request, as one step.
 		filterScore, mempoolScore := mempoolBanScores(sp.UserAgent())
 		score := sp.mempoolScore.Int()
 		if score+filterScore+mempoolScore > maxMempoolBanScore {
@@ -225,9 +229,20 @@ func (r *mempoolRequester) candidates() []*ServerPeer {
 }
 
 // ask asks sp for the filter of its mempool and, when it matches entries, for
-// its mempool, and returns whether sp sent the filter.
+// its mempool.  It returns false when sp could not be asked, didn't answer, or
+// the mempool message no longer fits the ban score.  The caller then tries
+// another peer, and the request stays wanted until a peer finishes it.  It
+// returns true once sp has answered and any mempool message the answer calls
+// for was sent.
 func (r *mempoolRequester) ask(sp *ServerPeer, entries [][]byte) bool {
 	filterScore, mempoolScore := mempoolBanScores(sp.UserAgent())
+
+	// Reserve the filter and the mempool message together.  A peer that
+	// no longer has room for both is one candidates would have skipped:
+	// nothing is sent, and the peer does not sit out.
+	if !sp.mempoolScore.tryTake(filterScore, filterScore+mempoolScore, maxMempoolBanScore) {
+		return false
+	}
 
 	msgChan := make(chan spMsg)
 	subQuit := make(chan struct{})
@@ -238,7 +253,6 @@ func (r *mempoolRequester) ask(sp *ServerPeer, entries [][]byte) bool {
 		close(subQuit)
 	}()
 
-	sp.mempoolScore.Increase(0, filterScore)
 	sp.QueueMessage(wire.NewMsgGetCFMempool(wire.GCSFilterRegular), nil)
 	r.watchDrop(sp)
 
@@ -269,7 +283,13 @@ func (r *mempoolRequester) ask(sp *ServerPeer, entries [][]byte) bool {
 				return false
 			}
 			if matched {
-				sp.mempoolScore.Increase(0, mempoolScore)
+				// The filter is in.  Count the mempool message
+				// only while it still fits.  A false return sends
+				// no mempool message and leaves the request wanted,
+				// so a later tick asks again.
+				if !sp.mempoolScore.tryTake(mempoolScore, mempoolScore, maxMempoolBanScore) {
+					return false
+				}
 				sp.QueueMessage(wire.NewMsgMemPool(), nil)
 				r.watchDrop(sp)
 			}

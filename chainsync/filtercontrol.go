@@ -45,6 +45,10 @@ var filterHeaderCheckpoints = map[wire.BitcoinNet]map[uint32]*chainhash.Hash{
 func ControlCFHeader(params chaincfg.Params, fType wire.FilterType,
 	height uint32, filterHeader *chainhash.Hash) error {
 
+	// No script filter headers are hardcoded.
+	if fType == wire.GCSFilterScripts {
+		return nil
+	}
 	if fType != wire.GCSFilterRegular {
 		return fmt.Errorf("unsupported filter type %v", fType)
 	}

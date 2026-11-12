@@ -2,9 +2,11 @@ package neutrino
 
 import (
 	"bytes"
+	"errors"
 
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil/gcs/builder"
 )
 
 // FoundSpend is a spend that SearchSpends found.
@@ -48,6 +50,11 @@ type FoundSpend struct {
 // each height, so a reorganization while it runs can leave blocks it passed off
 // the chain; a caller checks that the chain didn't change, as by the hash of the
 // block it got to, before it counts the range as searched.
+//
+// A service that syncs script filters can't search this way, as a script
+// filter holds the script of each output its block spends in place of the
+// outpoint, and returns ErrSpendSearchNeedsScripts: SearchScriptSpends takes
+// the scripts too.
 func (s *ChainService) SearchSpends(outpoints []wire.OutPoint, from, to int32,
 	found func(FoundSpend) []wire.OutPoint, progress func(height int32),
 	quit <-chan struct{}) (int32, error) {
@@ -55,10 +62,95 @@ func (s *ChainService) SearchSpends(outpoints []wire.OutPoint, from, to int32,
 	return searchSpends(s, outpoints, from, to, found, progress, quit, s.quit)
 }
 
+// ErrSpendSearchNeedsScripts is returned by SearchSpends on a service that
+// syncs script filters, which match a spend by the script of the output
+// spent, not by its outpoint.
+var ErrSpendSearchNeedsScripts = errors.New("a spend search on script " +
+	"filters needs the script of each outpoint's output")
+
+// SearchScriptSpends is SearchSpends for outpoints that come with the scripts
+// of their outputs, which is what a service that syncs script filters matches
+// a spend by.  found returns the outpoints to watch from there on with their
+// scripts too.  On a service that syncs regular filters it searches by the
+// outpoints, as SearchSpends does.
+//
+// A script filter matches every block that pays or spends an output with one
+// of the scripts, so a search for an outpoint whose script is used often
+// fetches more blocks than one on regular filters.
+func (s *ChainService) SearchScriptSpends(inputs []InputWithScript, from, to int32,
+	found func(FoundSpend) []InputWithScript, progress func(height int32),
+	quit <-chan struct{}) (int32, error) {
+
+	return searchScriptSpends(s, inputs, from, to, found, progress, quit, s.quit)
+}
+
+// searchScriptSpends is SearchScriptSpends on a source.
+func searchScriptSpends(source searchSource, inputs []InputWithScript, from, to int32,
+	found func(FoundSpend) []InputWithScript, progress func(height int32),
+	quit, shutdown <-chan struct{}) (int32, error) {
+
+	scriptFilters := filterTypeOf(source) == wire.GCSFilterScripts
+	watched := make(map[wire.OutPoint]struct{}, len(inputs))
+	scripts := make(map[wire.OutPoint][]byte, len(inputs))
+	for _, input := range inputs {
+		watched[input.OutPoint] = struct{}{}
+		scripts[input.OutPoint] = input.PkScript
+	}
+
+	// A script filter is matched with the keys of the scripts of the
+	// outpoints still watched, each once.
+	entries := func() ([][]byte, error) {
+		if !scriptFilters {
+			return spendFilterEntries(watched)
+		}
+		keys := make(map[[32]byte]struct{}, len(watched))
+		match := make([][]byte, 0, len(watched))
+		for outpoint := range watched {
+			key := builder.ScriptKey(scripts[outpoint])
+			if _, ok := keys[key]; !ok {
+				keys[key] = struct{}{}
+				match = append(match, key[:])
+			}
+		}
+		return match, nil
+	}
+
+	// The outpoints to watch from a spend on come with their scripts,
+	// which are kept for the filters that follow.
+	var follow func(FoundSpend) []wire.OutPoint
+	if found != nil {
+		follow = func(spend FoundSpend) []wire.OutPoint {
+			next := found(spend)
+			outpoints := make([]wire.OutPoint, len(next))
+			for i, input := range next {
+				outpoints[i] = input.OutPoint
+				scripts[input.OutPoint] = input.PkScript
+			}
+			return outpoints
+		}
+	}
+	onBlock := func(block *wire.MsgBlock, hash *chainhash.Hash, height int32) (scanStep, bool) {
+		changed := findBlockSpends(block, hash, height, watched, follow, from <= to)
+		if len(watched) == 0 {
+			return scanFinished, changed
+		}
+		return scanOn, changed
+	}
+	return scanFilters(source, from, to, entries, onBlock, progress, quit, shutdown)
+}
+
 // searchSpends is SearchSpends on a source.
 func searchSpends(source searchSource, outpoints []wire.OutPoint, from, to int32,
 	found func(FoundSpend) []wire.OutPoint, progress func(height int32),
 	quit, shutdown <-chan struct{}) (int32, error) {
+
+	if filterTypeOf(source) == wire.GCSFilterScripts {
+		reached := from - 1
+		if from > to {
+			reached = from + 1
+		}
+		return reached, ErrSpendSearchNeedsScripts
+	}
 
 	watched := make(map[wire.OutPoint]struct{}, len(outpoints))
 	for _, outpoint := range outpoints {

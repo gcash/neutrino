@@ -177,9 +177,11 @@ type ServerPeer struct {
 	quit     chan struct{}
 
 	// mempoolScore mirrors the ban score that the peer keeps for us, for
-	// our requests for its mempool, so that we never ask it once more
-	// than its score lets us without being banned.
-	mempoolScore connmgr.DynamicBanScore
+	// our requests for its mempool and for the leaves and proofs of a
+	// script filter's entry tree. The check that one more still fits and
+	// the add that counts it are one step, so two senders cannot each see
+	// room and together pass the score the peer bans at.
+	mempoolScore banScoreMirror
 
 	// bytesIn counts the bytes read from the peer's connection as they
 	// arrive, those of a message not yet whole too, so that a peer slow to
@@ -584,6 +586,13 @@ type Config struct {
 	// current on disk filter headers to sync them anew.
 	AssertFilterHeader *headerfs.FilterHeader
 
+	// FilterType is the type of the filters the ChainService syncs and
+	// matches: the regular filter by default, or wire.GCSFilterScripts
+	// for the script filter, which lists the scripts of the outputs a
+	// block creates and spends and the token categories of both.  Peers
+	// that don't serve the type are disconnected.
+	FilterType wire.FilterType
+
 	// BroadcastTimeout is the amount of time we'll wait before giving up on
 	// a transaction broadcast attempt. Broadcasting transactions consists
 	// of three steps:
@@ -595,6 +604,18 @@ type Config struct {
 	//
 	// If this is zero or negative, pushtx.DefaultBroadcastTimeout is used.
 	BroadcastTimeout time.Duration
+}
+
+// FilterType returns the type of the filters the ChainService syncs.
+func (s *ChainService) FilterType() wire.FilterType {
+	return s.filterType
+}
+
+// FilterHeaders returns the store of the filter headers the ChainService
+// syncs: RegFilterHeaders, or ScriptFilterHeaders when it syncs script
+// filters.
+func (s *ChainService) FilterHeaders() *headerfs.FilterHeaderStore {
+	return s.filterHeaders
 }
 
 // ChainService is instantiated with functional options
@@ -610,6 +631,15 @@ type ChainService struct {
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
 	persistToDisk    bool
+
+	// ScriptFilterHeaders holds the filter headers when the service syncs
+	// script filters, in place of RegFilterHeaders, which is then nil.
+	ScriptFilterHeaders *headerfs.FilterHeaderStore
+
+	// filterType is the type of the filters we sync, and filterHeaders
+	// the store of their headers: one of the two above.
+	filterType    wire.FilterType
+	filterHeaders *headerfs.FilterHeaderStore
 
 	FilterCache *lru.Cache
 	BlockCache  *lru.Cache
@@ -773,12 +803,22 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter,
+	headerType, err := headerTypeOf(cfg.FilterType)
+	if err != nil {
+		return nil, err
+	}
+	s.filterType = cfg.FilterType
+	s.filterHeaders, err = headerfs.NewFilterHeaderStore(
+		cfg.DataDir, cfg.Database, headerType,
 		&cfg.ChainParams, cfg.AssertFilterHeader,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if s.filterType == wire.GCSFilterScripts {
+		s.ScriptFilterHeaders = s.filterHeaders
+	} else {
+		s.RegFilterHeaders = s.filterHeaders
 	}
 
 	bm, err := newBlockManager(&s, s.firstPeerConnect)
@@ -843,6 +883,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		BestSnapshot: s.BestBlock,
 		GetBlockHash: s.GetBlockHash,
 		GetBlock:     s.GetBlock,
+		FilterType:   s.filterType,
 		BlockFilterMatches: func(ro *rescanOptions,
 			blockHash *chainhash.Hash) (bool, error) {
 
@@ -878,7 +919,7 @@ func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 		return nil, err
 	}
 
-	_, filterHeight, err := s.RegFilterHeaders.ChainTip()
+	_, filterHeight, err := s.filterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
@@ -1056,7 +1097,7 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		Timestamp: header.Timestamp,
 	}
 
-	_, regHeight, err := s.RegFilterHeaders.ChainTip()
+	_, regHeight, err := s.filterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
@@ -1071,7 +1112,7 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 
 		// Only roll back filter headers if they've caught up this far.
 		if uint32(bs.Height) <= regHeight {
-			newFilterTip, err := s.RegFilterHeaders.RollbackLastBlock(newTip)
+			newFilterTip, err := s.filterHeaders.RollbackLastBlock(newTip)
 			if err != nil {
 				return nil, err
 			}
@@ -1315,6 +1356,11 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 	// Signal the block manager this peer is a new sync candidate.
 	s.blockManager.NewPeer(sp)
+
+	// A peer that doesn't serve the script filters we sync is of no use.
+	if s.filterType == wire.GCSFilterScripts {
+		go s.probeScriptFilters(sp)
+	}
 
 	// Update the address manager and request known addresses from the
 	// remote peer for outbound connections. This is skipped when running on
@@ -1696,8 +1742,8 @@ func (s *ChainService) Stop() error {
 			log.Errorf("Unable to close block header store: %v", err)
 		}
 	}
-	if s.RegFilterHeaders != nil {
-		if err := s.RegFilterHeaders.Close(); err != nil {
+	if s.filterHeaders != nil {
+		if err := s.filterHeaders.Close(); err != nil {
 			log.Errorf("Unable to close filter header store: %v", err)
 		}
 	}
@@ -1747,7 +1793,7 @@ func (s *RescanChainSource) GetBlockHeader(
 // height.
 func (s *RescanChainSource) GetFilterHeaderByHeight(
 	height uint32) (*chainhash.Hash, error) {
-	return s.RegFilterHeaders.FetchHeaderByHeight(height)
+	return s.filterHeaders.FetchHeaderByHeight(height)
 }
 
 // Subscribe returns a block subscription that delivers block notifications in
