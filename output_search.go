@@ -5,6 +5,7 @@ import (
 
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil/gcs/builder"
 )
 
 // FoundOutput is a transaction that pays to one of the scripts that
@@ -47,8 +48,18 @@ func searchOutputs(source searchSource, scripts [][]byte, from, to int32,
 	found func(FoundOutput) bool, progress func(height int32),
 	quit, shutdown <-chan struct{}) (int32, error) {
 
+	// A regular filter holds the scripts a block pays, a script filter
+	// their keys.
+	match := scripts
+	if filterTypeOf(source) == wire.GCSFilterScripts {
+		match = make([][]byte, len(scripts))
+		for i, script := range scripts {
+			key := builder.ScriptKey(script)
+			match[i] = key[:]
+		}
+	}
 	entries := func() ([][]byte, error) {
-		return scripts, nil
+		return match, nil
 	}
 	onBlock := func(block *wire.MsgBlock, hash *chainhash.Hash, height int32) (scanStep, bool) {
 		if !findBlockOutputs(block, hash, height, scripts, found) {

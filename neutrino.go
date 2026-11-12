@@ -881,6 +881,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		BestSnapshot: s.BestBlock,
 		GetBlockHash: s.GetBlockHash,
 		GetBlock:     s.GetBlock,
+		FilterType:   s.filterType,
 		BlockFilterMatches: func(ro *rescanOptions,
 			blockHash *chainhash.Hash) (bool, error) {
 
