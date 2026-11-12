@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,7 +98,17 @@ type rescanOptions struct {
 	watchAddrs  []bchutil.Address
 	watchInputs []InputWithScript
 	watchList   [][]byte
-	txIdx       uint32
+
+	// watchCategories are the token categories to watch, which only
+	// script filters hold.
+	watchCategories [][32]byte
+
+	// filterType is the type of the filters the chain source syncs, which
+	// tells what the watch list holds: scripts, outpoints and transaction
+	// IDs for regular filters, the keys of scripts and of token categories
+	// for script filters.
+	filterType wire.FilterType
+	txIdx      uint32
 
 	update <-chan *updateOptions
 	quit   <-chan struct{}
@@ -181,6 +192,72 @@ type InputWithScript struct {
 
 	// PkScript is the script of the previous output.
 	PkScript []byte
+}
+
+// WatchCategories specifies the token categories to watch: a transaction with
+// an output that carries tokens of one is reported, and so is one that spends
+// such an output it was reported for.  Only script filters hold token
+// categories, so a rescan on a chain source that syncs regular filters fails
+// with ErrCategoriesNeedScriptFilters.  Each call to this function adds to the
+// list of categories being watched rather than replacing the list.
+func WatchCategories(categories ...[32]byte) RescanOption {
+	return func(ro *rescanOptions) {
+		ro.watchCategories = append(ro.watchCategories, categories...)
+	}
+}
+
+// ErrCategoriesNeedScriptFilters is returned by a rescan that is given token
+// categories to watch on a chain source that syncs regular filters, which
+// don't hold them.
+var ErrCategoriesNeedScriptFilters = errors.New("token categories can only " +
+	"be watched on script filters")
+
+// filterTyped is a chain source that tells the type of the filters it syncs.
+// ChainService does, and a source that doesn't syncs regular filters.
+type filterTyped interface {
+	FilterType() wire.FilterType
+}
+
+// filterTypeOf returns the type of the filters a chain source syncs.
+func filterTypeOf(source interface{}) wire.FilterType {
+	if typed, ok := source.(filterTyped); ok {
+		return typed.FilterType()
+	}
+	return wire.GCSFilterRegular
+}
+
+// watchScript adds a script to what block filters are matched with: the
+// script itself for regular filters, its key for script filters.
+func (ro *rescanOptions) watchScript(script []byte) {
+	if ro.filterType == wire.GCSFilterScripts {
+		key := builder.ScriptKey(script)
+		ro.watchList = append(ro.watchList, key[:])
+		return
+	}
+	ro.watchList = append(ro.watchList, script)
+}
+
+// watchOutPoint adds an outpoint to what block filters are matched with.  A
+// regular filter holds the outpoints its block spends.  A script filter holds
+// the script of each output its block spends instead, so the script of the
+// outpoint's output, which is watched with it, matches its spend.
+func (ro *rescanOptions) watchOutPoint(outPoint *wire.OutPoint) error {
+	if ro.filterType == wire.GCSFilterScripts {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := outPoint.Serialize(&buf); err != nil {
+		return err
+	}
+	ro.watchList = append(ro.watchList, buf.Bytes())
+	return nil
+}
+
+// watchCategory adds a token category to what script filters are matched
+// with.
+func (ro *rescanOptions) watchCategory(category [32]byte) {
+	key := builder.CategoryKey(category)
+	ro.watchList = append(ro.watchList, key[:])
 }
 
 // WatchInputs specifies the outpoints to watch for on-chain spends. We also
@@ -338,23 +415,31 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		option(ro)
 	}
 
+	// What the watch list holds depends on the filters the chain syncs.
+	ro.filterType = filterTypeOf(chain)
+	if len(ro.watchCategories) != 0 && ro.filterType != wire.GCSFilterScripts {
+		return ErrCategoriesNeedScriptFilters
+	}
+
 	// If we have something to watch, create a watch list. The watch list
-	// can be composed of a set of scripts, outpoints, and txids.
+	// can be composed of a set of scripts, outpoints, and txids, or for
+	// script filters, of the keys of scripts and token categories.
 	for _, addr := range ro.watchAddrs {
 		script, err := txscript.PayToAddrScript(addr)
 		if err != nil {
 			return err
 		}
 
-		ro.watchList = append(ro.watchList, script)
+		ro.watchScript(script)
 	}
 	for _, input := range ro.watchInputs {
-		var buf bytes.Buffer
-		if err := input.OutPoint.Serialize(&buf); err != nil {
+		ro.watchScript(input.PkScript)
+		if err := ro.watchOutPoint(&input.OutPoint); err != nil {
 			return err
 		}
-		ro.watchList = append(ro.watchList, input.PkScript)
-		ro.watchList = append(ro.watchList, buf.Bytes())
+	}
+	for _, category := range ro.watchCategories {
+		ro.watchCategory(category)
 	}
 
 	// Check that we have either an end block or a quit channel.
@@ -615,7 +700,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// Otherwise, we'll attempt to fetch the filter to retrieve the
 		// relevant transactions and notify them.
 		blockFilter, err := chain.GetCFilter(
-			newStamp.Hash, wire.GCSFilterRegular,
+			newStamp.Hash, ro.filterType,
 			ro.withQuit(NumRetries(0))...,
 		)
 		if errors.Is(err, ErrShuttingDown) {
@@ -1207,6 +1292,12 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 		if err != nil {
 			return nil, err
 		}
+
+		// An output with tokens of a watched category is watched for
+		// its spend the same way.
+		if ro.carriesWatchedCategory(tx) {
+			pays[i] = true
+		}
 	}
 
 	relevantTxs := make([]*bchutil.Tx, 0, len(txs))
@@ -1299,7 +1390,7 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	// filters. To speed up the fetching, we make an optimistic batch
 	// query.
 	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular,
+		*blockHash, ro.filterType,
 		ro.withQuit(OptimisticBatch())...,
 	)
 	if err != nil {
@@ -1329,8 +1420,13 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader) (bool, error) {
 
+	if len(update.categories) != 0 && ro.filterType != wire.GCSFilterScripts {
+		return false, ErrCategoriesNeedScriptFilters
+	}
+
 	ro.watchAddrs = append(ro.watchAddrs, update.addrs...)
 	ro.watchInputs = append(ro.watchInputs, update.inputs...)
+	ro.watchCategories = append(ro.watchCategories, update.categories...)
 
 	for _, addr := range update.addrs {
 		script, err := txscript.PayToAddrScript(addr)
@@ -1338,18 +1434,23 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 			return false, err
 		}
 
-		ro.watchList = append(ro.watchList, script)
+		ro.watchScript(script)
 	}
 	for _, input := range update.inputs {
-		var buf bytes.Buffer
-		if err := input.OutPoint.Serialize(&buf); err != nil {
+		ro.watchScript(input.PkScript)
+		if err := ro.watchOutPoint(&input.OutPoint); err != nil {
 			return false, err
 		}
-		ro.watchList = append(ro.watchList, input.PkScript)
-		ro.watchList = append(ro.watchList, buf.Bytes())
 	}
+	for _, category := range update.categories {
+		ro.watchCategory(category)
+	}
+
+	// Script filters don't hold transaction IDs.
 	for _, txid := range update.txIDs {
-		ro.watchList = append(ro.watchList, txid[:])
+		if ro.filterType != wire.GCSFilterScripts {
+			ro.watchList = append(ro.watchList, txid[:])
+		}
 	}
 
 	// If we don't need to rewind, then we can exit early.
@@ -1445,18 +1546,48 @@ txOutLoop:
 				PkScript: pkScript,
 				OutPoint: outPoint,
 			})
-			var buf bytes.Buffer
-			if err := outPoint.Serialize(&buf); err != nil {
+			ro.watchScript(pkScript)
+			if err := ro.watchOutPoint(&outPoint); err != nil {
 				return false, err
 			}
-			ro.watchList = append(ro.watchList, pkScript)
-			ro.watchList = append(ro.watchList, buf.Bytes())
 
 			continue txOutLoop
 		}
 	}
 
 	return anyMatchingOutputs, nil
+}
+
+// carriesWatchedCategory returns whether the transaction has an output that
+// carries tokens of a watched category.  If that is the case, this also
+// watches the output for its spend.  The script filter of the block that
+// spends it holds the category again, so only the outpoint is watched, not
+// the script that holds the tokens.
+func (ro *rescanOptions) carriesWatchedCategory(tx *bchutil.Tx) bool {
+	if len(ro.watchCategories) == 0 {
+		return false
+	}
+	anyMatchingOutputs := false
+	for outIdx, out := range tx.MsgTx().TxOut {
+		if out.TokenData.IsEmpty() || !slices.Contains(
+			ro.watchCategories, [32]byte(out.TokenData.CategoryID),
+		) {
+			continue
+		}
+		anyMatchingOutputs = true
+
+		outPoint := wire.OutPoint{Hash: *tx.Hash(), Index: uint32(outIdx)}
+		watched := slices.ContainsFunc(ro.watchInputs, func(input InputWithScript) bool {
+			return input.OutPoint == outPoint
+		})
+		if !watched {
+			ro.watchInputs = append(ro.watchInputs, InputWithScript{
+				PkScript: out.PkScript,
+				OutPoint: outPoint,
+			})
+		}
+	}
+	return anyMatchingOutputs
 }
 
 // Rescan is an object that represents a long-running rescan/notification
@@ -1531,6 +1662,7 @@ func (r *Rescan) Start() <-chan error {
 type updateOptions struct {
 	addrs                    []bchutil.Address
 	inputs                   []InputWithScript
+	categories               [][32]byte
 	txIDs                    []chainhash.Hash
 	rewind                   uint32
 	disableDisconnectedNtfns bool
@@ -1554,6 +1686,14 @@ func AddAddrs(addrs ...bchutil.Address) UpdateOption {
 func AddInputs(inputs ...InputWithScript) UpdateOption {
 	return func(uo *updateOptions) {
 		uo.inputs = append(uo.inputs, inputs...)
+	}
+}
+
+// AddCategories adds token categories to watch to the filter, as
+// WatchCategories does for a new rescan.
+func AddCategories(categories ...[32]byte) UpdateOption {
+	return func(uo *updateOptions) {
+		uo.categories = append(uo.categories, categories...)
 	}
 }
 

@@ -15,7 +15,6 @@ import (
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
-	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/neutrino/cache"
 	"github.com/gcash/neutrino/filterdb"
 	"github.com/gcash/neutrino/pushtx"
@@ -1286,7 +1285,7 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 			numFilters+1, len(blockHeaders))
 	}
 
-	filterHeaders, _, err := s.RegFilterHeaders.FetchHeaderAncestors(
+	filterHeaders, _, err := s.filterHeaders.FetchHeaderAncestors(
 		numFilters, stopHash,
 	)
 	if err != nil {
@@ -1372,9 +1371,7 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 		return
 	}
 
-	gotFilter, err := gcs.FromNBytes(
-		builder.DefaultP, builder.DefaultM, response.Data,
-	)
+	gotFilter, root, err := parseServedFilter(q.filterType, response.Data)
 	if err != nil {
 		// Malformed filter data. We can ignore this message.
 		return
@@ -1385,8 +1382,8 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 	// checks out. If not, we can ignore this response.
 	curHeader := q.filterHeaders[i]
 	prevHeader := q.filterHeaders[i-1]
-	gotHeader, err := builder.MakeHeaderForFilter(
-		gotFilter, prevHeader,
+	gotHeader, err := servedFilterHeader(
+		q.filterType, gotFilter, root, prevHeader,
 	)
 	if err != nil {
 		return
@@ -1411,7 +1408,7 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 	// Config.PersistToDisk is set.
 	// TODO(halseth): for an LRU we could take care to insert the next
 	// height filter last.
-	dbFilterType := filterdb.RegularFilter
+	dbFilterType := dbFilterTypeOf(q.filterType)
 	evict, err := s.putFilterToCache(
 		&response.BlockHash, dbFilterType, gotFilter,
 	)
@@ -1457,15 +1454,15 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
 
-	// The only supported filter atm is the regular filter, so we'll reject
-	// all other filters.
-	if filterType != wire.GCSFilterRegular {
-		return nil, fmt.Errorf("unknown filter type: %v", filterType)
+	// We only have the filter headers of the type we sync to check a
+	// filter against, so we'll reject all other filters.
+	if filterType != s.filterType {
+		return nil, fmt.Errorf("filter type %v is not the one synced, %v",
+			filterType, s.filterType)
 	}
 
-	// Based on if extended is true or not, we'll set up our set of
-	// querying, and db-write functions.
-	dbFilterType := filterdb.RegularFilter
+	// The filter type tells the cache and the database apart.
+	dbFilterType := dbFilterTypeOf(filterType)
 
 	// First check the cache to see if we already have this filter. If
 	// so, then we can return it an exit early.
