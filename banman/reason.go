@@ -20,6 +20,11 @@ const (
 	// InvalidFilterHeaderCheckpoint signals that a peer served us an
 	// invalid filter header checkpoint.
 	InvalidFilterHeaderCheckpoint Reason = 4
+
+	// InvalidMempoolInterval signals that a peer announced a mempool
+	// interval again with a different hash or count, or sent transactions
+	// that are not the ones it announced for that interval.
+	InvalidMempoolInterval Reason = 5
 )
 
 // String returns a human-readable description for the reason a peer was banned.
@@ -36,6 +41,9 @@ func (r Reason) String() string {
 
 	case InvalidFilterHeaderCheckpoint:
 		return "peer served invalid filter header checkpoint"
+
+	case InvalidMempoolInterval:
+		return "peer served an invalid mempool interval"
 
 	default:
 		return "unknown reason"

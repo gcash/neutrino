@@ -378,10 +378,9 @@ func (sp *ServerPeer) OnTx(_ *peer.Peer, msg *wire.MsgTx) {
 	sp.server.blockManager.QueueTx(bchutil.NewTx(msg), sp)
 }
 
-// deliverMempoolTx takes a transaction of a mempool interval we asked for.  A
-// run of intervals reaches back over ones we asked for before, so that the
-// peer can't tell which transaction we want, and a transaction we already
-// have is not reported again.
+// deliverMempoolTx takes a transaction of a mempool interval we asked for.
+// An interval asked again after its answer was lost can bring a transaction
+// we already have, which is not reported again.
 func (s *ChainService) deliverMempoolTx(tx *bchutil.Tx) {
 	if s.mempool.HaveTransaction(tx.Hash()) {
 		return
@@ -390,34 +389,97 @@ func (s *ChainService) deliverMempoolTx(tx *bchutil.Tx) {
 }
 
 // OnMpFilter is invoked when a peer sends the script filter of one interval
-// of transactions it admitted to its mempool.  A filter that matches a script
-// we watch is answered with a request for a run of intervals, when one more
-// request leaves the ban score the peer keeps for us at the highest we allow.
+// of transactions it admitted to its mempool.  Only the feed peer is kept.
+// Pending intervals are then asked for while the ban score allows.
 func (sp *ServerPeer) OnMpFilter(_ *peer.Peer, msg *wire.MsgMpFilter) {
-	m := sp.server.mempoolIntervals
+	s := sp.server
+	m := s.mempoolIntervals
 	if m == nil {
 		return
 	}
-	// One getmptxs adds mpTxsBanScore, the same amount bchd adds for it.
-	canAsk := sp.mempoolScore.Int()+mpTxsBanScore <= maxMempoolBanScore
-	if get := m.onFilter(sp.Addr(), msg, canAsk); get != nil {
-		if sp.mempoolScore.tryTake(mpTxsBanScore, mpTxsBanScore, maxMempoolBanScore) {
-			sp.QueueMessage(get, nil)
-		}
+	if err := m.onFilter(sp.ID(), msg); err != nil {
+		s.banMempoolInterval(sp, err)
+		return
 	}
+	s.askMempoolIntervals()
 }
 
 // OnMpTxs is invoked when a peer sends the transactions of an interval of its
-// mempool.  A message that doesn't match the interval the peer announced
+// mempool.  A message that is not what the peer announced bans and
 // disconnects the peer.
 func (sp *ServerPeer) OnMpTxs(_ *peer.Peer, msg *wire.MsgMpTxs) {
-	m := sp.server.mempoolIntervals
+	s := sp.server
+	m := s.mempoolIntervals
 	if m == nil {
 		return
 	}
-	if err := m.onTxs(sp.Addr(), msg); err != nil {
-		log.Warnf("Disconnecting peer %v: %v", sp, err)
-		sp.Disconnect()
+	if err := m.onTxs(sp.ID(), msg); err != nil {
+		s.banMempoolInterval(sp, err)
+	}
+}
+
+// banMempoolInterval bans and disconnects a feed that sent a mempool interval
+// that is not what it announced.  A disconnect alone would let the peer come
+// back and send it again, and a made-up count on a large interval is how a
+// peer would probe which interval matched.
+func (s *ChainService) banMempoolInterval(sp *ServerPeer, err error) {
+	log.Warnf("Banning peer %v: %v", sp, err)
+	banErr := s.BanPeer(sp.Addr(), banman.InvalidMempoolInterval)
+	if banErr != nil {
+		log.Errorf("Unable to ban peer %v: %v", sp, banErr)
+	}
+	sp.Disconnect()
+}
+
+// askMempoolIntervals sends the feed a getmptxs for each pending run the ban
+// score allows.  It does nothing when the feed is gone.  The check that the
+// score has room and the add that counts the request are one step.
+func (s *ChainService) askMempoolIntervals() {
+	m := s.mempoolIntervals
+	if m == nil {
+		return
+	}
+	id, ok := m.feed()
+	if !ok {
+		return
+	}
+	var sp *ServerPeer
+	for _, peer := range s.Peers() {
+		if peer.ID() == id {
+			sp = peer
+			break
+		}
+	}
+	if sp == nil {
+		return
+	}
+	for {
+		get := m.next(func() bool {
+			return sp.mempoolScore.tryTake(mpTxsBanScore, mpTxsBanScore,
+				maxMempoolBanScore)
+		})
+		if get == nil {
+			return
+		}
+		sp.QueueMessage(get, nil)
+	}
+}
+
+// serveMempoolIntervals asks the feed for pending intervals once a second
+// until the service stops.  A match the score could not take when its filter
+// arrived is fetched once the score has decayed, even if no later interval
+// comes.
+func (s *ChainService) serveMempoolIntervals() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(mpIntervalTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.askMempoolIntervals()
+		case <-s.quit:
+			return
+		}
 	}
 }
 
@@ -637,6 +699,16 @@ type Config struct {
 	// that don't serve the type are disconnected.
 	FilterType wire.FilterType
 
+	// MempoolFetchFloor is how many transactions an interval of mempool
+	// transactions must hold before its filter is consulted.  An interval
+	// with fewer transactions than this is always downloaded, as a wallet
+	// on regular filters downloads every transaction.  One with this many
+	// or more is downloaded only when its filter matches something the
+	// wallet watches, which tells the peer that one of that many
+	// transactions is of interest.  A larger value gives more privacy and
+	// more data.  Zero means the default.
+	MempoolFetchFloor uint32
+
 	// BroadcastTimeout is the amount of time we'll wait before giving up on
 	// a transaction broadcast attempt. Broadcasting transactions consists
 	// of three steps:
@@ -741,10 +813,10 @@ type ChainService struct {
 	mempoolRequests *mempoolRequester
 
 	// mempoolIntervals learns of unconfirmed transactions from the script
-	// filters peers send for each short interval of their mempool, when we
-	// sync script filters.  It is nil for a service that syncs regular
-	// filters, which hears of them from the filter of the whole mempool and
-	// from announcements, and nil in blocks only mode.
+	// filters one feed peer sends for each short interval of its mempool,
+	// when we sync script filters.  It is nil for a service that syncs
+	// regular filters, which hears of them from the filter of the whole
+	// mempool and from announcements, and nil in blocks only mode.
 	mempoolIntervals *mempoolIntervals
 
 	proxy string
@@ -933,8 +1005,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// Interval filters take the place of transaction announcements.  A
 	// service that only wants blocks asks for neither.
 	if s.filterType == wire.GCSFilterScripts && !s.blocksOnly {
-		s.mempoolIntervals = newMempoolIntervals(s.mempoolRequests.entryList,
-			s.deliverMempoolTx)
+		s.mempoolIntervals = newMempoolIntervals(cfg.MempoolFetchFloor,
+			s.mempoolRequests.entryList, s.deliverMempoolTx, time.Now)
 	}
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
@@ -1439,10 +1511,14 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		go s.probeScriptFilters(sp)
 	}
 
-	// The interval filters tell us of the transactions we watch, so ask
-	// this peer to send one as each interval of its mempool closes.
+	// Only the feed is asked for interval filters.  The first peer we have
+	// becomes the feed.  Another peer is not asked, so it never sees which
+	// intervals we download.
 	if s.mempoolIntervals != nil {
-		sp.QueueMessage(wire.NewMsgSendMpFilter(wire.GCSFilterScripts), nil)
+		if _, ok := s.mempoolIntervals.feed(); !ok && sp.ID() > 0 {
+			s.mempoolIntervals.setFeed(sp.ID())
+			sp.QueueMessage(wire.NewMsgSendMpFilter(wire.GCSFilterScripts), nil)
+		}
 	}
 
 	// Update the address manager and request known addresses from the
@@ -1486,9 +1562,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		}
 		delete(list, sp.ID())
 		log.Debugf("Removed peer %s", sp)
-		if s.mempoolIntervals != nil {
-			s.mempoolIntervals.forget(sp.Addr())
-		}
+		s.doneMempoolFeed(state, sp)
 		return
 	}
 
@@ -1505,9 +1579,43 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 
 	// If we get here it means that either we didn't know about the peer
 	// or we purposefully deleted it.  A peer removed by a disconnect
-	// request never reaches the delete above, and its intervals go too.
-	if s.mempoolIntervals != nil {
-		s.mempoolIntervals.forget(sp.Addr())
+	// request never reaches the delete above.  If it was the feed, its
+	// intervals still go.
+	s.doneMempoolFeed(state, sp)
+}
+
+// doneMempoolFeed drops the feed's intervals when sp was the feed, asks
+// another connected peer to send interval filters, and asks again for the
+// filter of the whole mempool so transactions admitted during the change are
+// found.  The peer set is the one handleDonePeerMsg already holds.  Asking
+// Peers for it would wait on this same goroutine, which is the one that
+// answers that query.
+func (s *ChainService) doneMempoolFeed(state *peerState, sp *ServerPeer) {
+	m := s.mempoolIntervals
+	if m == nil || sp == nil {
+		return
+	}
+	id, ok := m.feed()
+	if !ok || id != sp.ID() {
+		return
+	}
+	var next *ServerPeer
+	state.forAllPeers(func(p *ServerPeer) {
+		if next != nil || p.ID() == sp.ID() || !p.Connected() || p.ID() <= 0 {
+			return
+		}
+		next = p
+	})
+	if next == nil {
+		m.setFeed(0)
+		log.Debugf("Peer %s was the mempool interval feed, and no peer is left", sp)
+	} else {
+		m.setFeed(next.ID())
+		next.QueueMessage(wire.NewMsgSendMpFilter(wire.GCSFilterScripts), nil)
+		log.Debugf("Peer %s is the mempool interval feed", next)
+	}
+	if s.mempoolRequests != nil {
+		s.mempoolRequests.want()
 	}
 }
 
@@ -1806,6 +1914,13 @@ func (s *ChainService) Start() error {
 		defer s.wg.Done()
 		s.mempoolRequests.run()
 	}()
+
+	// Regular filters and blocks only mode have no interval feed, so they
+	// grow no goroutine here.
+	if s.mempoolIntervals != nil {
+		s.wg.Add(1)
+		go s.serveMempoolIntervals()
+	}
 
 	return nil
 }
