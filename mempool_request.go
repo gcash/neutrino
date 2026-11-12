@@ -63,6 +63,10 @@ type mempoolRequester struct {
 	now    func() time.Time
 	quit   <-chan struct{}
 
+	// filterType is the filter we ask for the mempool with.  The zero value
+	// is the regular filter.
+	filterType wire.FilterType
+
 	// timeout is how long a peer has to send the filter of its mempool,
 	// and dropWindow is mempoolDropWindow.
 	timeout    time.Duration
@@ -114,6 +118,18 @@ func (r *mempoolRequester) request(entries [][]byte) {
 	}
 	r.mtx.Unlock()
 	r.want()
+}
+
+// entryList returns a copy of the entries we watch, so a caller can match a
+// filter against them without holding the requester's lock.
+func (r *mempoolRequester) entryList() [][]byte {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	entries := make([][]byte, 0, len(r.entries))
+	for entry := range r.entries {
+		entries = append(entries, []byte(entry))
+	}
+	return entries
 }
 
 // want asks for the mempool, if there is anything we watch.
@@ -239,7 +255,7 @@ func (r *mempoolRequester) ask(sp *ServerPeer, entries [][]byte) bool {
 	}()
 
 	sp.mempoolScore.Increase(0, filterScore)
-	sp.QueueMessage(wire.NewMsgGetCFMempool(wire.GCSFilterRegular), nil)
+	sp.QueueMessage(wire.NewMsgGetCFMempool(r.filterType), nil)
 	r.watchDrop(sp)
 
 	timeout := time.After(r.timeout)
@@ -249,7 +265,7 @@ func (r *mempoolRequester) ask(sp *ServerPeer, entries [][]byte) bool {
 			// The filter of the mempool comes with no block hash,
 			// which tells it from the filters of blocks.
 			cfilter, ok := m.msg.(*wire.MsgCFilter)
-			if !ok || cfilter.FilterType != wire.GCSFilterRegular ||
+			if !ok || cfilter.FilterType != r.filterType ||
 				cfilter.BlockHash != (chainhash.Hash{}) {
 
 				continue

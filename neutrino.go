@@ -24,6 +24,7 @@ import (
 	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
 	"github.com/gcash/neutrino/banman"
@@ -375,6 +376,48 @@ func (sp *ServerPeer) OnTx(_ *peer.Peer, msg *wire.MsgTx) {
 	sp.server.blockManager.QueueTx(bchutil.NewTx(msg), sp)
 }
 
+// deliverMempoolTx takes a transaction of a mempool interval we asked for.  A
+// run of intervals reaches back over ones we asked for before, so that the
+// peer can't tell which transaction we want, and a transaction we already
+// have is not reported again.
+func (s *ChainService) deliverMempoolTx(tx *bchutil.Tx) {
+	if s.mempool.HaveTransaction(tx.Hash()) {
+		return
+	}
+	s.mempool.AddTransaction(tx)
+}
+
+// OnMpFilter is invoked when a peer sends the script filter of one interval
+// of transactions it admitted to its mempool.  A filter that matches a script
+// we watch is answered with a request for a run of intervals, when one more
+// request leaves the ban score the peer keeps for us at the highest we allow.
+func (sp *ServerPeer) OnMpFilter(_ *peer.Peer, msg *wire.MsgMpFilter) {
+	m := sp.server.mempoolIntervals
+	if m == nil {
+		return
+	}
+	// One getmptxs adds mpTxsBanScore, the same amount bchd adds for it.
+	canAsk := sp.mempoolScore.Int()+mpTxsBanScore <= maxMempoolBanScore
+	if get := m.onFilter(sp.Addr(), msg, canAsk); get != nil {
+		sp.mempoolScore.Increase(0, mpTxsBanScore)
+		sp.QueueMessage(get, nil)
+	}
+}
+
+// OnMpTxs is invoked when a peer sends the transactions of an interval of its
+// mempool.  A message that doesn't match the interval the peer announced
+// disconnects the peer.
+func (sp *ServerPeer) OnMpTxs(_ *peer.Peer, msg *wire.MsgMpTxs) {
+	m := sp.server.mempoolIntervals
+	if m == nil {
+		return
+	}
+	if err := m.onTxs(sp.Addr(), msg); err != nil {
+		log.Warnf("Disconnecting peer %v: %v", sp, err)
+		sp.Disconnect()
+	}
+}
+
 // OnHeaders is invoked when a peer receives a headers bitcoin
 // message.  The message is passed down to the block manager.
 func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
@@ -694,6 +737,13 @@ type ChainService struct {
 	// mempools that RequestMempoolFilter asks for.
 	mempoolRequests *mempoolRequester
 
+	// mempoolIntervals learns of unconfirmed transactions from the script
+	// filters peers send for each short interval of their mempool, when we
+	// sync script filters.  It is nil for a service that syncs regular
+	// filters, which hears of them from the filter of the whole mempool and
+	// from announcements, and nil in blocks only mode.
+	mempoolIntervals *mempoolIntervals
+
 	proxy string
 
 	broadcastTimeout time.Duration
@@ -876,6 +926,13 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.mempoolRequests = newMempoolRequester(s.Peers, func() bool {
 		return s.blockManager.BlockHeadersSynced()
 	}, s.quit)
+	s.mempoolRequests.filterType = s.filterType
+	// Interval filters take the place of transaction announcements.  A
+	// service that only wants blocks asks for neither.
+	if s.filterType == wire.GCSFilterScripts && !s.blocksOnly {
+		s.mempoolIntervals = newMempoolIntervals(s.mempoolRequests.entryList,
+			s.deliverMempoolTx)
+	}
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
 		BestSnapshot: s.BestBlock,
@@ -1055,6 +1112,25 @@ func (s *ChainService) RequestMempoolFilter(addrs []bchutil.Address,
 	outPoints []wire.OutPoint) {
 
 	if s.blocksOnly {
+		return
+	}
+
+	// A script filter holds the script of each output a transaction
+	// spends, not the outpoint, and a wallet's outpoints pay its own
+	// addresses, which are watched already.
+	if s.filterType == wire.GCSFilterScripts {
+		entries := make([][]byte, 0, len(addrs))
+		for _, addr := range addrs {
+			script, err := txscript.PayToAddrScript(addr)
+			if err != nil {
+				log.Errorf("Unable to watch %v in the mempool: %v", addr,
+					err)
+				continue
+			}
+			key := builder.ScriptKey(script)
+			entries = append(entries, key[:])
+		}
+		s.mempoolRequests.request(entries)
 		return
 	}
 
@@ -1360,6 +1436,12 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		go s.probeScriptFilters(sp)
 	}
 
+	// The interval filters tell us of the transactions we watch, so ask
+	// this peer to send one as each interval of its mempool closes.
+	if s.mempoolIntervals != nil {
+		sp.QueueMessage(wire.NewMsgSendMpFilter(wire.GCSFilterScripts), nil)
+	}
+
 	// Update the address manager and request known addresses from the
 	// remote peer for outbound connections. This is skipped when running on
 	// a development network since it is only intended to connect to
@@ -1401,6 +1483,9 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		}
 		delete(list, sp.ID())
 		log.Debugf("Removed peer %s", sp)
+		if s.mempoolIntervals != nil {
+			s.mempoolIntervals.forget(sp.Addr())
+		}
 		return
 	}
 
@@ -1416,7 +1501,11 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	}
 
 	// If we get here it means that either we didn't know about the peer
-	// or we purposefully deleted it.
+	// or we purposefully deleted it.  A peer removed by a disconnect
+	// request never reaches the delete above, and its intervals go too.
+	if s.mempoolIntervals != nil {
+		s.mempoolIntervals.forget(sp.Addr())
+	}
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
@@ -1469,6 +1558,8 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			OnRead:      sp.OnRead,
 			OnWrite:     sp.OnWrite,
 			OnTx:        sp.OnTx,
+			OnMpFilter:  sp.OnMpFilter,
+			OnMpTxs:     sp.OnMpTxs,
 			OnNotFound:  sp.OnNotFound,
 		},
 		NewestBlock:      sp.newestBlock,
@@ -1478,8 +1569,11 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 		ChainParams:      &sp.server.chainParams,
 		Services:         sp.server.services,
 		ProtocolVersion:  wire.FeeFilterVersion,
-		DisableRelayTx:   sp.server.blocksOnly,
-		Proxy:            sp.server.proxy,
+		// The interval filters tell us of the transactions we watch, so
+		// peers needn't announce every transaction.
+		DisableRelayTx: sp.server.blocksOnly ||
+			sp.server.filterType == wire.GCSFilterScripts,
+		Proxy: sp.server.proxy,
 	}
 }
 
