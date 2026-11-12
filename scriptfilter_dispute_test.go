@@ -2,6 +2,7 @@ package neutrino
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -156,6 +157,15 @@ type disputePeer struct {
 
 	// tamper changes a proof before it is sent.
 	tamper func(*wire.MsgCFProof)
+
+	// filter, when set, is the filter the peer serves in place of the
+	// one its leaves give.
+	filter []byte
+
+	// askedRanges counts the cfrange requests, and tamperRange changes a
+	// cfrange before it is sent.
+	askedRanges int
+	tamperRange func(*wire.MsgCFRange)
 }
 
 func (p *disputePeer) root() chainhash.Hash {
@@ -505,6 +515,216 @@ func TestIsTrueScriptLeaf(t *testing.T) {
 			if ok(proof, above) {
 				t.Errorf("leaf %d: a spent output from a higher block accepted", i)
 			}
+		}
+	}
+}
+
+// rangeOf answers a getcfrange the way a node does.
+func (p *disputePeer) rangeOf(bits uint16, prefix [32]byte) *wire.MsgCFRange {
+	p.askedRanges++
+	if p.silent {
+		return nil
+	}
+	first, end, err := builder.ScriptLeavesWithPrefix(p.leaves, &prefix, bits)
+	if err != nil {
+		return nil
+	}
+	msg := &wire.MsgCFRange{
+		FilterType: wire.GCSFilterScripts,
+		BlockHash:  p.chain.block.header.BlockHash(),
+		LeafCount:  uint32(len(p.leaves)),
+		FirstIndex: uint32(first),
+	}
+	for i := first; i < end; i++ {
+		msg.Leaves = append(msg.Leaves, wire.CFLeaf(p.leaves[i].Bytes()))
+	}
+	lo, hi := first, end
+	if first > 0 {
+		before := wire.CFLeaf(p.leaves[first-1].Bytes())
+		msg.Before = &before
+		lo--
+	}
+	if end < len(p.leaves) {
+		after := wire.CFLeaf(p.leaves[end].Bytes())
+		msg.After = &after
+		hi++
+	}
+	if lo < hi {
+		msg.Hashes, _ = builder.ScriptRangeHashes(p.leaves, lo, hi)
+	}
+	if p.tamperRange != nil {
+		p.tamperRange(msg)
+	}
+	return msg
+}
+
+// servedFilter returns what the peer serves for the block: its root, and the
+// filter of its leaves' keys unless it serves another.
+func (p *disputePeer) servedFilter(t *testing.T) servedScriptFilter {
+	t.Helper()
+	if p.filter != nil {
+		return servedScriptFilter{root: p.root(), filter: p.filter}
+	}
+	hash := p.chain.block.header.BlockHash()
+	filter, err := scriptFilterOfLeaves(&hash, p.leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := filter.NBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return servedScriptFilter{root: p.root(), filter: data}
+}
+
+// settleFilters runs a dispute over the filters peers serve, and returns the
+// peers found at fault, sorted.
+func (c *disputeChain) settleFilters(t *testing.T, peers map[string]*disputePeer) []string {
+	t.Helper()
+	served := make(map[string]servedScriptFilter)
+	for name, p := range peers {
+		served[name] = p.servedFilter(t)
+	}
+	proofs := func(peer string, index uint32) *wire.MsgCFProof {
+		return peers[peer].proof(index)
+	}
+	ranges := func(peer string, bits uint16, prefix [32]byte) *wire.MsgCFRange {
+		msg := peers[peer].rangeOf(bits, prefix)
+		if msg == nil {
+			return nil
+		}
+		var buf bytes.Buffer
+		if err := msg.BchEncode(&buf, wire.ProtocolVersion, wire.BaseEncoding); err != nil {
+			return nil
+		}
+		read := new(wire.MsgCFRange)
+		if err := read.BchDecode(&buf, wire.ProtocolVersion, wire.BaseEncoding); err != nil {
+			return nil
+		}
+		return read
+	}
+	bad := settleScriptFilters(c.block.header.BlockHash(), &c.block.header,
+		c.block.height, served, proofs, ranges, c.headers)
+	slices.Sort(bad)
+	return bad
+}
+
+// TestSettleScriptFiltersSameRoot pits a peer that serves the true filter
+// against peers that serve the true root in front of another filter, and
+// checks that the leaves, fetched in several runs, tell them apart.
+func TestSettleScriptFiltersSameRoot(t *testing.T) {
+	c := newDisputeChain(t)
+	hash := c.block.header.BlockHash()
+	defer func(n uint32) { scriptLeavesPerRange = n }(scriptLeavesPerRange)
+
+	// A filter without one of the tree's keys, and one with a key more.
+	filterOf := func(leaves []builder.ScriptLeaf) []byte {
+		filter, err := scriptFilterOfLeaves(&hash, leaves)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := filter.NBytes()
+		return data
+	}
+	var fewer []builder.ScriptLeaf
+	for _, leaf := range c.leaves {
+		if leaf.Key != c.leaves[0].Key {
+			fewer = append(fewer, leaf)
+		}
+	}
+	extra := append(slices.Clone(c.leaves), builder.ScriptLeaf{Key: [32]byte{0xab}})
+
+	for _, perRange := range []uint32{100000, 4, 1} {
+		scriptLeavesPerRange = perRange
+		for name, filter := range map[string][]byte{
+			"a key left out": filterOf(fewer), "a key more": filterOf(extra),
+			"no keys": {0x00}, "not a filter": {0xff, 0x01},
+		} {
+			honest, liar, liar2 := c.honest(), c.honest(), c.honest()
+			liar.filter, liar2.filter = filter, filter
+			bad := c.settleFilters(t, map[string]*disputePeer{
+				"honest": honest, "liar": liar, "liar2": liar2,
+			})
+			if !slices.Equal(bad, []string{"liar", "liar2"}) {
+				t.Errorf("%d leaves a run, %s: peers at fault %v", perRange, name, bad)
+			}
+			// The leaves are fetched once, from one peer, and no leaf
+			// is proved when the roots agree.
+			runs := honest.askedRanges + liar.askedRanges + liar2.askedRanges
+			if runs < 2 || (perRange == 1 && runs < 17) || honest.asked+liar.asked+liar2.asked != 0 {
+				t.Errorf("%d leaves a run, %s: %d runs and %d proofs asked for",
+					perRange, name, runs, honest.asked+liar.asked+liar2.asked)
+			}
+		}
+	}
+
+	// Peers that agree on the root and the filter are left alone.
+	scriptLeavesPerRange = 4
+	if bad := c.settleFilters(t, map[string]*disputePeer{"a": c.honest(), "b": c.honest()}); len(bad) != 0 {
+		t.Errorf("peers that agree found at fault: %v", bad)
+	}
+
+	// A wrong tree and a wrong filter under the true root, together.
+	wrongFilter := c.honest()
+	wrongFilter.filter = filterOf(fewer)
+	wrongTree := c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf { return l[1:] })
+	bad := c.settleFilters(t, map[string]*disputePeer{
+		"honest": c.honest(), "wrongFilter": wrongFilter, "wrongTree": wrongTree,
+	})
+	if !slices.Equal(bad, []string{"wrongFilter", "wrongTree"}) {
+		t.Errorf("a wrong tree and a wrong filter: peers at fault %v", bad)
+	}
+}
+
+// TestFetchScriptLeaves fetches the leaves of the test block's tree in runs
+// of every size, and refuses a peer that leaves a run out, changes a leaf,
+// answers for another tree, or doesn't answer.
+func TestFetchScriptLeaves(t *testing.T) {
+	c := newDisputeChain(t)
+	hash := c.block.header.BlockHash()
+	defer func(n uint32) { scriptLeavesPerRange = n }(scriptLeavesPerRange)
+
+	fetchFrom := func(p *disputePeer) ([]builder.ScriptLeaf, error) {
+		return fetchScriptLeaves("peer", hash, builder.ScriptLeavesRoot(c.leaves),
+			func(_ string, bits uint16, prefix [32]byte) *wire.MsgCFRange {
+				return p.rangeOf(bits, prefix)
+			})
+	}
+	for _, perRange := range []uint32{100000, 8, 3, 1} {
+		scriptLeavesPerRange = perRange
+		leaves, err := fetchFrom(c.honest())
+		if err != nil || !slices.Equal(leaves, c.leaves) {
+			t.Fatalf("%d leaves a run: %d leaves, %v", perRange, len(leaves), err)
+		}
+	}
+
+	scriptLeavesPerRange = 3
+	bad := map[string]func(p *disputePeer){
+		"a run without its last leaf": func(p *disputePeer) {
+			p.tamperRange = func(msg *wire.MsgCFRange) {
+				if n := len(msg.Leaves); n > 1 {
+					msg.Leaves = msg.Leaves[:n-1]
+				}
+			}
+		},
+		"a changed leaf": func(p *disputePeer) {
+			p.tamperRange = func(msg *wire.MsgCFRange) {
+				if len(msg.Leaves) > 0 {
+					msg.Leaves[0][35] ^= 1
+				}
+			}
+		},
+		"another leaf count": func(p *disputePeer) {
+			p.tamperRange = func(msg *wire.MsgCFRange) { msg.LeafCount++ }
+		},
+		"another tree": func(p *disputePeer) { p.leaves = p.leaves[1:] },
+		"no answer":    func(p *disputePeer) { p.silent = true },
+	}
+	for name, change := range bad {
+		p := c.honest()
+		change(p)
+		if _, err := fetchFrom(p); !errors.Is(err, errScriptProof) {
+			t.Errorf("%s: got %v", name, err)
 		}
 	}
 }

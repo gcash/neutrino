@@ -8,6 +8,7 @@ import (
 	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
 )
 
@@ -35,6 +36,14 @@ import (
 // Either way one of the two serves a wrong filter, and a few dozen small
 // messages decide which, whatever the size of the block.  The requests name
 // leaf indexes, so they say nothing of what we watch.
+//
+// A peer can also serve the true root in front of a filter that doesn't hold
+// the tree's keys.  Peers that agree on the root and not on the filter are
+// told apart by the leaves themselves: every leaf is fetched from one of
+// them with cfrange messages, in runs by key prefix that are each checked
+// against the root, and the filter built from them is the one a peer must
+// serve.  That costs 41 bytes a leaf, about half the size of the block, and
+// only when a peer lies this way.
 
 // scriptProofSource asks a peer for the cfproof of one leaf of the entry tree
 // of the block in dispute.  It returns nil when the peer doesn't answer.
@@ -405,5 +414,196 @@ func settleScriptFilterDispute(block chainhash.Hash, header *wire.BlockHeader,
 				delete(trees, peer)
 			}
 		}
+	}
+}
+
+// scriptRangeSource asks a peer for the leaves of the entry tree of the block
+// in dispute whose keys start with the first bits of prefix.  It returns nil
+// when the peer doesn't answer.
+type scriptRangeSource func(peer string, bits uint16, prefix [32]byte) *wire.MsgCFRange
+
+// scriptLeavesPerRange is about how many leaves we ask a peer for at once: a
+// few megabytes of them.
+var scriptLeavesPerRange uint32 = 100000
+
+// parseScriptRange parses the leaves of a cfrange message.
+func parseScriptRange(msg *wire.MsgCFRange) (run []builder.ScriptLeaf,
+	before, after *builder.ScriptLeaf, err error) {
+
+	run = make([]builder.ScriptLeaf, len(msg.Leaves))
+	for i := range msg.Leaves {
+		if run[i], err = builder.ParseScriptLeaf(msg.Leaves[i][:]); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	for _, neighbour := range []struct {
+		from *wire.CFLeaf
+		to   **builder.ScriptLeaf
+	}{{msg.Before, &before}, {msg.After, &after}} {
+		if neighbour.from == nil {
+			continue
+		}
+		leaf, err := builder.ParseScriptLeaf(neighbour.from[:])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		*neighbour.to = &leaf
+	}
+	return run, before, after, nil
+}
+
+// fetchScriptLeaves fetches every leaf of the entry tree with the given root
+// from a peer that serves it, in runs by key prefix.  Each run is checked
+// against the root, which shows that it leaves out no leaf with its prefix
+// and that its leaves are in order, so the runs together are the whole tree.
+func fetchScriptLeaves(peer string, block, root chainhash.Hash,
+	fetch scriptRangeSource) ([]builder.ScriptLeaf, error) {
+
+	ask := func(bits uint16, prefix [32]byte, at uint32) (*wire.MsgCFRange, []builder.ScriptLeaf, error) {
+		msg := fetch(peer, bits, prefix)
+		if msg == nil {
+			return nil, nil, fmt.Errorf("%w: no cfrange for prefix %x/%d",
+				errScriptProof, prefix[:2], bits)
+		}
+		if msg.FilterType != wire.GCSFilterScripts || msg.BlockHash != block {
+			return nil, nil, fmt.Errorf("%w: cfrange for another block", errScriptProof)
+		}
+		run, before, after, err := parseScriptRange(msg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", errScriptProof, err)
+		}
+		err = builder.CheckScriptRange(root, msg.LeafCount, msg.FirstIndex, run,
+			before, after, msg.Hashes, &prefix, bits)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", errScriptProof, err)
+		}
+		return msg, run, nil
+	}
+
+	// The range of one whole key is small, and tells how many leaves the
+	// tree has.
+	first, _, err := ask(wire.MaxCFRangePrefixBits, [32]byte{}, 0)
+	if err != nil {
+		return nil, err
+	}
+	count := first.LeafCount
+
+	// Split the keys by enough of their first bits that a run has about
+	// scriptLeavesPerRange leaves.
+	var bits uint16
+	for bits < 16 && count>>bits > scriptLeavesPerRange {
+		bits++
+	}
+	leaves := make([]builder.ScriptLeaf, 0, count)
+	for i := uint32(0); i < 1<<bits; i++ {
+		var prefix [32]byte
+		if bits > 0 {
+			shifted := i << (16 - bits)
+			prefix[0], prefix[1] = byte(shifted>>8), byte(shifted)
+		}
+		msg, run, err := ask(bits, prefix, uint32(len(leaves)))
+		if err != nil {
+			return nil, err
+		}
+		if msg.LeafCount != count || msg.FirstIndex != uint32(len(leaves)) {
+			return nil, fmt.Errorf("%w: run %d starts at leaf %d of %d, after "+
+				"%d of %d", errScriptProof, i, msg.FirstIndex, msg.LeafCount,
+				len(leaves), count)
+		}
+		leaves = append(leaves, run...)
+	}
+	if uint32(len(leaves)) != count {
+		return nil, fmt.Errorf("%w: %d leaves of %d", errScriptProof, len(leaves), count)
+	}
+	return leaves, nil
+}
+
+// scriptFilterOfLeaves builds the script filter of a block from the leaves of
+// its entry tree.
+func scriptFilterOfLeaves(block *chainhash.Hash, leaves []builder.ScriptLeaf) (*gcs.Filter, error) {
+	b := builder.WithKeyHash(block)
+	if _, err := b.Key(); err != nil {
+		return nil, err
+	}
+	for i := range leaves {
+		b.AddEntry(leaves[i].Key[:])
+	}
+	return b.Build()
+}
+
+// servedScriptFilter is a script filter as a peer serves it: the root of the
+// block's entry tree, and the serialized filter after it.
+type servedScriptFilter struct {
+	root   chainhash.Hash
+	filter []byte
+}
+
+// settleScriptFilters returns the peers at fault among those that serve the
+// given script filters for one block, when the filters are not all the same.
+// Peers that serve different roots are told apart first, by their proofs of
+// single leaves.  If those left still serve different filters under one
+// root, the filter is built from that tree's leaves, and the peers that serve
+// another are at fault.
+func settleScriptFilters(block chainhash.Hash, header *wire.BlockHeader, height uint32,
+	served map[string]servedScriptFilter, proofs scriptProofSource,
+	ranges scriptRangeSource, headers scriptHeaderSource) []string {
+
+	roots := make(map[string]chainhash.Hash, len(served))
+	for peer, f := range served {
+		roots[peer] = f.root
+	}
+	badPeers := settleScriptFilterDispute(block, header, height, roots, proofs, headers)
+	left := make(map[string]servedScriptFilter, len(served))
+	for peer, f := range served {
+		left[peer] = f
+	}
+	for _, peer := range badPeers {
+		delete(left, peer)
+	}
+
+	for {
+		// Done once the peers left serve one filter.
+		var one []byte
+		same := true
+		for _, f := range left {
+			if one == nil {
+				one = f.filter
+			}
+			same = same && bytes.Equal(one, f.filter)
+		}
+		if same {
+			return badPeers
+		}
+
+		// Any of them can give the leaves, as they are checked against
+		// the root that all of them serve.  One that can't is at fault.
+		var from string
+		for peer := range left {
+			from = peer
+			break
+		}
+		leaves, err := fetchScriptLeaves(from, block, left[from].root, ranges)
+		if err != nil {
+			log.Warnf("Peer %v could not give the leaves of block %v: %v",
+				from, block, err)
+			badPeers = append(badPeers, from)
+			delete(left, from)
+			continue
+		}
+		filter, err := scriptFilterOfLeaves(&block, leaves)
+		if err != nil {
+			return badPeers
+		}
+		want, err := filter.NBytes()
+		if err != nil {
+			return badPeers
+		}
+		for peer, f := range left {
+			if !bytes.Equal(f.filter, want) {
+				badPeers = append(badPeers, peer)
+				delete(left, peer)
+			}
+		}
+		return badPeers
 	}
 }
