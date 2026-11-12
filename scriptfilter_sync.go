@@ -178,6 +178,7 @@ func (b *blockManager) settleScriptFiltersOfPeers(header *wire.BlockHeader,
 	}
 	return settleScriptFilters(
 		blockHash, header, height, filters, proofs, ranges, headers,
+		uint32(b.server.chainParams.MagneticAnonomalyForkHeight),
 	)
 }
 
