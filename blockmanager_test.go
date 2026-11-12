@@ -91,6 +91,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 		chainParams:      chaincfg.SimNetParams,
 		BlockHeaders:     hdrStore,
 		RegFilterHeaders: cfStore,
+		filterHeaders:    cfStore,
 		banStore:         banStore,
 	}
 

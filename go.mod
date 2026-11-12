@@ -3,16 +3,17 @@ module github.com/gcash/neutrino
 go 1.26.0
 
 require (
+	github.com/aead/siphash v1.0.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/gcash/bchd v0.22.5-0.20261105020735-bb13df8168a3
 	github.com/gcash/bchlog v0.0.0-20261027020323-7b5704c0a60f
 	github.com/gcash/bchutil v0.0.0-20261028060706-e320ade87427
 	github.com/gcash/bchwallet v0.13.2-0.20261028013728-d29e5627b006
 	github.com/gcash/bchwallet/walletdb v1.0.0
+	github.com/kkdai/bstream v1.0.0
 )
 
 require (
-	github.com/aead/siphash v1.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bluele/gcache v0.0.2 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
@@ -32,7 +33,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.33.0 // indirect
 	github.com/jessevdk/go-flags v1.6.1 // indirect
 	github.com/jrick/logrotate v1.1.2 // indirect
-	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
@@ -55,3 +55,7 @@ require (
 )
 
 tool github.com/gcash/bchd
+
+replace github.com/gcash/bchd => github.com/CyberAshven/bchd v0.22.1-0.20261112073812-1286d9919d34
+
+replace github.com/gcash/bchutil => github.com/CyberAshven/bchutil v0.0.0-20261112073614-58259c11508c
