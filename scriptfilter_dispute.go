@@ -143,7 +143,7 @@ func (t *scriptTree) leaf(index uint32) (*scriptLeafProof, error) {
 	// where it is even and not the last of its level.
 	proof := &scriptLeafProof{leaf: leaf, msg: msg}
 	branch := msg.LeafBranch
-	for at, width := index, msg.LeafCount; width > 1; at, width = at/2, (width+1)/2 {
+	for at, width := uint64(index), uint64(msg.LeafCount); width > 1; at, width = at/2, (width+1)/2 {
 		switch {
 		case at%2 == 1:
 			proof.lefts = append(proof.lefts, branch[0])
@@ -218,15 +218,20 @@ func scriptLeafOf(txOut *wire.TxOut, key *[32]byte, category bool) bool {
 // leaf names must be under the block's Merkle root, and its output, or for a
 // leaf of a spent output the output its input spends, must give the leaf's
 // key.  A spent output's transaction must be under the Merkle root of a
-// block of our chain no higher than the block.
+// block of our chain no higher than the block.  smallTxUntil is the last
+// height at which a block may hold a transaction of 64 bytes.
 func isTrueScriptLeaf(proof *scriptLeafProof, header *wire.BlockHeader, height uint32,
-	headers scriptHeaderSource) bool {
+	headers scriptHeaderSource, smallTxUntil uint32) bool {
 
 	leaf, msg := &proof.leaf, proof.msg
 	tx := msg.Tx
 
-	// A transaction of 64 bytes could be an inner node of the Merkle tree.
-	if tx == nil || tx.SerializeSize() == 64 ||
+	// At or below smallTxUntil a 64-byte transaction is a valid one and is
+	// judged by its Merkle branch like any other.  Above that height no
+	// block can hold one, so 64 bytes there can only be an inner node of
+	// the Merkle tree.  A spent output's transaction is judged the same way
+	// at its own block's height, which is known once that header is read.
+	if tx == nil || (height > smallTxUntil && tx.SerializeSize() == 64) ||
 		!checkTxMerkleBranch(tx.TxHash(), leaf.TxIndex, msg.TxBranch, &header.MerkleRoot) {
 
 		return false
@@ -245,7 +250,7 @@ func isTrueScriptLeaf(proof *scriptLeafProof, header *wire.BlockHeader, height u
 	}
 	prevOut := &tx.TxIn[leaf.Index].PreviousOutPoint
 	prevTx := msg.PrevTx
-	if prevTx.SerializeSize() == 64 || prevTx.TxHash() != prevOut.Hash ||
+	if prevTx.TxHash() != prevOut.Hash ||
 		prevOut.Index >= uint32(len(prevTx.TxOut)) {
 
 		return false
@@ -254,6 +259,9 @@ func isTrueScriptLeaf(proof *scriptLeafProof, header *wire.BlockHeader, height u
 	if !ok || prevHeight > height || !checkTxMerkleBranch(
 		prevOut.Hash, msg.PrevTxIndex, msg.PrevTxBranch, &prevHeader.MerkleRoot,
 	) {
+		return false
+	}
+	if prevHeight > smallTxUntil && prevTx.SerializeSize() == 64 {
 		return false
 	}
 	return scriptLeafOf(prevTx.TxOut[prevOut.Index], &leaf.Key, category)
@@ -272,9 +280,10 @@ type scriptVerdict struct {
 }
 
 // settleScriptTrees finds which of two peers that serve different roots for
-// a block is at fault.
+// a block is at fault.  smallTxUntil is the last height at which a block may
+// hold a transaction of 64 bytes.
 func settleScriptTrees(a, b *scriptTree, header *wire.BlockHeader, height uint32,
-	headers scriptHeaderSource) scriptVerdict {
+	headers scriptHeaderSource, smallTxUntil uint32) scriptVerdict {
 
 	countA, err := a.leafCount()
 	if err != nil {
@@ -357,7 +366,7 @@ func settleScriptTrees(a, b *scriptTree, header *wire.BlockHeader, height uint32
 	// A true entry that sorts before the other peer's leaf there, with
 	// the same leaves before both, is not in the other peer's tree where
 	// a sorted tree would have it.
-	if isTrueScriptLeaf(proof, header, height, headers) {
+	if isTrueScriptLeaf(proof, header, height, headers, smallTxUntil) {
 		return scriptVerdict{bad: other.peer, wrongTree: true}
 	}
 	return scriptVerdict{bad: holder.peer, wrongTree: true}
@@ -367,10 +376,11 @@ func settleScriptTrees(a, b *scriptTree, header *wire.BlockHeader, height uint32
 // the given entry tree roots for one block, when the roots are not all the
 // same.  Peers are compared two at a time until those left serve one root.
 // One peer that serves the true filter and proves its leaves is enough for
-// every other root to be found wrong.
+// every other root to be found wrong.  smallTxUntil is the last height at
+// which a block may hold a transaction of 64 bytes.
 func settleScriptFilterDispute(block chainhash.Hash, header *wire.BlockHeader,
 	height uint32, roots map[string]chainhash.Hash, fetch scriptProofSource,
-	headers scriptHeaderSource) []string {
+	headers scriptHeaderSource, smallTxUntil uint32) []string {
 
 	trees := make(map[string]*scriptTree, len(roots))
 	for peer, root := range roots {
@@ -396,7 +406,7 @@ func settleScriptFilterDispute(block chainhash.Hash, header *wire.BlockHeader,
 			return badPeers
 		}
 
-		verdict := settleScriptTrees(a, b, header, height, headers)
+		verdict := settleScriptTrees(a, b, header, height, headers, smallTxUntil)
 		if verdict.bad == "" {
 			// Neither can be shown wrong by the other.  Both are
 			// dropped, so that the dispute ends.
@@ -425,6 +435,15 @@ type scriptRangeSource func(peer string, bits uint16, prefix [32]byte) *wire.Msg
 // scriptLeavesPerRange is about how many leaves we ask a peer for at once: a
 // few megabytes of them.
 var scriptLeavesPerRange uint32 = 100000
+
+// maxScriptLeaves returns the most leaves the entry tree of a block we would
+// take can have.  An output takes at least 10 bytes of its block and gives
+// one leaf, or two with tokens, which take more than 10 bytes more, and an
+// input takes more than 40 bytes and gives two at most.  It keeps a peer
+// from sending leaves without end for a tree no block gives.
+var maxScriptLeaves = func() uint64 {
+	return uint64(wire.MaxBlockPayload()) / 10
+}
 
 // parseScriptRange parses the leaves of a cfrange message.
 func parseScriptRange(msg *wire.MsgCFRange) (run []builder.ScriptLeaf,
@@ -487,6 +506,10 @@ func fetchScriptLeaves(peer string, block, root chainhash.Hash,
 		return nil, err
 	}
 	count := first.LeafCount
+	if uint64(count) > maxScriptLeaves() {
+		return nil, fmt.Errorf("%w: %d leaves are more than a block gives",
+			errScriptProof, count)
+	}
 
 	// Split the keys by enough of their first bits that a run has about
 	// scriptLeavesPerRange leaves.
@@ -494,7 +517,9 @@ func fetchScriptLeaves(peer string, block, root chainhash.Hash,
 	for bits < 16 && count>>bits > scriptLeavesPerRange {
 		bits++
 	}
-	leaves := make([]builder.ScriptLeaf, 0, count)
+	// Not sized by the peer's count: memory grows only with the leaves
+	// that were sent and checked against the root.
+	var leaves []builder.ScriptLeaf
 	for i := uint32(0); i < 1<<bits; i++ {
 		var prefix [32]byte
 		if bits > 0 {
@@ -543,16 +568,18 @@ type servedScriptFilter struct {
 // Peers that serve different roots are told apart first, by their proofs of
 // single leaves.  If those left still serve different filters under one
 // root, the filter is built from that tree's leaves, and the peers that serve
-// another are at fault.
+// another are at fault.  smallTxUntil is the last height at which a block
+// may hold a transaction of 64 bytes.
 func settleScriptFilters(block chainhash.Hash, header *wire.BlockHeader, height uint32,
 	served map[string]servedScriptFilter, proofs scriptProofSource,
-	ranges scriptRangeSource, headers scriptHeaderSource) []string {
+	ranges scriptRangeSource, headers scriptHeaderSource, smallTxUntil uint32) []string {
 
 	roots := make(map[string]chainhash.Hash, len(served))
 	for peer, f := range served {
 		roots[peer] = f.root
 	}
-	badPeers := settleScriptFilterDispute(block, header, height, roots, proofs, headers)
+	badPeers := settleScriptFilterDispute(block, header, height, roots, proofs, headers,
+		smallTxUntil)
 	left := make(map[string]servedScriptFilter, len(served))
 	for peer, f := range served {
 		left[peer] = f

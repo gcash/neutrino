@@ -33,6 +33,11 @@ type disputeChain struct {
 	}
 	block  *disputeBlock
 	leaves []builder.ScriptLeaf
+
+	// smallTxUntil is the last height at which a block may hold a
+	// transaction of 64 bytes.  The zero value is below the blocks
+	// newDisputeChain builds, so those tests still refuse one.
+	smallTxUntil uint32
 }
 
 func disputeScript(n byte) []byte {
@@ -238,7 +243,7 @@ func (c *disputeChain) settle(peers map[string]*disputePeer) []string {
 		return read
 	}
 	bad := settleScriptFilterDispute(c.block.header.BlockHash(), &c.block.header,
-		c.block.height, roots, fetch, c.headers)
+		c.block.height, roots, fetch, c.headers, c.smallTxUntil)
 	slices.Sort(bad)
 	return bad
 }
@@ -474,7 +479,8 @@ func TestIsTrueScriptLeaf(t *testing.T) {
 			return &scriptLeafProof{leaf: proof.leaf, msg: &msg}
 		}
 		ok := func(proof *scriptLeafProof, headers scriptHeaderSource) bool {
-			return isTrueScriptLeaf(proof, &block.header, block.height, headers)
+			return isTrueScriptLeaf(proof, &block.header, block.height, headers,
+				c.smallTxUntil)
 		}
 		if !ok(fresh(), c.headers) {
 			t.Fatalf("leaf %d (kind %d) of the block refused", i, c.leaves[i].Kind)
@@ -604,7 +610,7 @@ func (c *disputeChain) settleFilters(t *testing.T, peers map[string]*disputePeer
 		return read
 	}
 	bad := settleScriptFilters(c.block.header.BlockHash(), &c.block.header,
-		c.block.height, served, proofs, ranges, c.headers)
+		c.block.height, served, proofs, ranges, c.headers, c.smallTxUntil)
 	slices.Sort(bad)
 	return bad
 }
@@ -726,5 +732,345 @@ func TestFetchScriptLeaves(t *testing.T) {
 		if _, err := fetchFrom(p); !errors.Is(err, errScriptProof) {
 			t.Errorf("%s: got %v", name, err)
 		}
+	}
+}
+
+// newBareDisputeChain is an empty chain the small-transaction tests fill in.
+func newBareDisputeChain() *disputeChain {
+	return &disputeChain{
+		blocks: make(map[chainhash.Hash]*disputeBlock),
+		txLoc: make(map[chainhash.Hash]struct {
+			block *disputeBlock
+			index int
+		}),
+	}
+}
+
+// blockLeaves is the entry tree of one block.  prevOutScripts lines up with
+// the inputs of every transaction after the coinbase.
+func blockLeaves(t *testing.T, block *disputeBlock, prevOutScripts [][]byte) []builder.ScriptLeaf {
+	t.Helper()
+	msg := wire.NewMsgBlock(&block.header)
+	for _, tx := range block.txs {
+		msg.Transactions = append(msg.Transactions, tx.MsgTx())
+	}
+	leaves, err := builder.ScriptLeaves(msg, prevOutScripts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaves
+}
+
+// mustTx64 is a transaction of 64 bytes: version, one input with an empty
+// signature script, one output paying script, and a lock time.  script is 4
+// bytes and does not start with OP_RETURN.
+func mustTx64(t *testing.T, script []byte) *wire.MsgTx {
+	t.Helper()
+	tx := wire.NewMsgTx(1)
+	tx.AddTxIn(wire.NewTxIn(wire.NewOutPoint(&chainhash.Hash{}, 0), nil))
+	tx.AddTxOut(wire.NewTxOut(1000, script, wire.TokenData{}))
+	tx.LockTime = 1
+	if got := tx.SerializeSize(); got != 64 {
+		t.Fatalf("SerializeSize() = %d, want 64", got)
+	}
+	return tx
+}
+
+// TestScriptTreeLeafCountWraps checks that a peer whose tree claims
+// 4294967295 leaves, with the true leaves first and one padding leaf after
+// them, is the peer at fault against the true tree.  The walk over that width
+// has to use an integer wider than the width, or adding one wraps and the two
+// peers can no longer be told apart.
+func TestScriptTreeLeafCountWraps(t *testing.T) {
+	c := newDisputeChain(t)
+	n := len(c.leaves)
+	if n < 5 {
+		t.Fatalf("only %d leaves", n)
+	}
+	const count uint64 = 4294967295
+	pad := builder.ScriptLeaf{Key: [32]byte{0xff}}
+	padHash := builder.ScriptLeafHash(&pad)
+	leafHash := make([]chainhash.Hash, n)
+	for i := range c.leaves {
+		leafHash[i] = builder.ScriptLeafHash(&c.leaves[i])
+	}
+
+	// The tree is not stored leaf by leaf.  A padding subtree of 2^level
+	// equal leaves is the padding hash paired with itself, and a last node
+	// without a partner moves up unchanged.  4294967295 leaves take 32
+	// such steps to reach one node.
+	cache := make(map[[2]uint64]chainhash.Hash)
+	var node func(level, index uint64) chainhash.Hash
+	node = func(level, index uint64) chainhash.Hash {
+		key := [2]uint64{level, index}
+		if h, ok := cache[key]; ok {
+			return h
+		}
+		var h chainhash.Hash
+		if level < 64 {
+			size := uint64(1) << level
+			if index <= ^uint64(0)/size && index*size <= ^uint64(0)-size {
+				start, end := index*size, index*size+size
+				if start >= uint64(n) && end <= count-1 {
+					h = padHash
+					for i := uint64(0); i < level; i++ {
+						h = builder.ScriptNodeHash(&h, &h)
+					}
+					cache[key] = h
+					return h
+				}
+			}
+		}
+		if level == 0 {
+			if index < uint64(n) {
+				h = leafHash[index]
+			} else {
+				h = padHash
+			}
+		} else {
+			width := count
+			for i := uint64(0); i < level-1; i++ {
+				width = (width + 1) / 2
+			}
+			left := node(level-1, index*2)
+			if index*2+1 < width {
+				right := node(level-1, index*2+1)
+				h = builder.ScriptNodeHash(&left, &right)
+			} else {
+				h = left
+			}
+		}
+		cache[key] = h
+		return h
+	}
+	root := node(32, 0)
+	honest := c.honest()
+	if root == honest.root() {
+		t.Fatal("the padded tree has the true root")
+	}
+	branchOf := func(index uint64) []chainhash.Hash {
+		var branch []chainhash.Hash
+		at, width := index, count
+		for level := uint64(0); width > 1; level++ {
+			switch {
+			case at%2 == 1:
+				branch = append(branch, node(level, at-1))
+			case at+1 < width:
+				branch = append(branch, node(level, at+1))
+			}
+			at, width = at/2, (width+1)/2
+		}
+		return branch
+	}
+	checkBranch := func(index uint32, leaf builder.ScriptLeaf) {
+		t.Helper()
+		branch := branchOf(uint64(index))
+		if len(branch) > 32 {
+			t.Fatalf("leaf %d: branch has %d hashes", index, len(branch))
+		}
+		got, err := builder.ScriptRangeRoot(uint32(count), index,
+			[]builder.ScriptLeaf{leaf}, branch)
+		if err != nil || got != root {
+			t.Fatalf("leaf %d does not rebuild the padded root: %v", index, err)
+		}
+	}
+	checkBranch(0, c.leaves[0])
+	checkBranch(2, c.leaves[2])
+	checkBranch(uint32(n), pad)
+
+	var asked []uint32
+	fetch := func(peer string, index uint32) *wire.MsgCFProof {
+		if peer == "honest" {
+			return honest.proof(index)
+		}
+		asked = append(asked, index)
+		if index > uint32(n) {
+			return nil
+		}
+		leaf := pad
+		if int(index) < n {
+			leaf = c.leaves[index]
+		}
+		return &wire.MsgCFProof{
+			FilterType: wire.GCSFilterScripts,
+			BlockHash:  c.block.header.BlockHash(),
+			LeafCount:  uint32(count),
+			LeafIndex:  index,
+			Leaf:       wire.CFLeaf(leaf.Bytes()),
+			LeafBranch: branchOf(uint64(index)),
+			Tx:         wire.NewMsgTx(1),
+		}
+	}
+	bad := settleScriptFilterDispute(c.block.header.BlockHash(), &c.block.header,
+		c.block.height, map[string]chainhash.Hash{
+			"honest": honest.root(), "liar": root,
+		}, fetch, c.headers, c.smallTxUntil)
+	slices.Sort(bad)
+	if !slices.Equal(bad, []string{"liar"}) {
+		t.Fatalf("peers at fault %v, proofs asked of the liar %v", bad, asked)
+	}
+	if !slices.Contains(asked, uint32(n)) {
+		t.Fatalf("the leaf after the true ones was not proved, asked %v", asked)
+	}
+}
+
+// TestFetchScriptLeavesClaimedCount checks that a peer whose first cfrange
+// claims far more leaves than the message carries is refused, and that the
+// refusal returns without sizing storage by that count.
+func TestFetchScriptLeavesClaimedCount(t *testing.T) {
+	c := newDisputeChain(t)
+	p := c.honest()
+	p.tamperRange = func(msg *wire.MsgCFRange) {
+		if p.askedRanges == 1 {
+			msg.LeafCount = 4294967295
+		}
+	}
+	_, err := fetchScriptLeaves("peer", c.block.header.BlockHash(), p.root(),
+		func(_ string, bits uint16, prefix [32]byte) *wire.MsgCFRange {
+			return p.rangeOf(bits, prefix)
+		})
+	if !errors.Is(err, errScriptProof) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// TestIsTrueScriptLeafSmallTx checks that a real 64-byte transaction is
+// accepted in a block at smallTxUntil and refused above it.  The same bound
+// applies to a spent output whose previous transaction is 64 bytes, judged
+// at that previous block's height, while the spending transaction is not 64
+// bytes.
+func TestIsTrueScriptLeafSmallTx(t *testing.T) {
+	// 0x51 is not OP_RETURN, so the output is an entry in the script filter.
+	script := []byte{0x51, 0x01, 0x02, 0x03}
+	small := mustTx64(t, script)
+	c := newBareDisputeChain()
+
+	// H is the block that creates the 64-byte transaction.
+	const heightH = 5
+	funded := c.addBlock(heightH, small)
+	fundLeaves := blockLeaves(t, funded, nil)
+	if len(fundLeaves) != 1 {
+		t.Fatalf("%d leaves in the 64-byte transaction's block", len(fundLeaves))
+	}
+	outProof := &scriptLeafProof{
+		leaf: fundLeaves[0],
+		msg: &wire.MsgCFProof{
+			Leaf:     wire.CFLeaf(fundLeaves[0].Bytes()),
+			Tx:       small,
+			TxBranch: blockchain.MerkleBranch(funded.merkles, 0),
+		},
+	}
+	if !isTrueScriptLeaf(outProof, &funded.header, heightH, c.headers, heightH) {
+		t.Fatal("64-byte transaction at smallTxUntil refused")
+	}
+	if isTrueScriptLeaf(outProof, &funded.header, heightH, c.headers, heightH-1) {
+		t.Fatal("64-byte transaction above smallTxUntil accepted")
+	}
+
+	// P is the block of the 64-byte transaction a later block spends.
+	const heightP = heightH
+	const spendHeight = 9
+	coinbase := wire.NewMsgTx(1)
+	coinbase.AddTxIn(wire.NewTxIn(
+		wire.NewOutPoint(&chainhash.Hash{}, wire.MaxPrevOutIndex), []byte{0x04, 0x51}))
+	coinbase.AddTxOut(wire.NewTxOut(5000, disputeScript(9), wire.TokenData{}))
+	spend := wire.NewMsgTx(2)
+	prevHash := small.TxHash()
+	spend.AddTxIn(wire.NewTxIn(wire.NewOutPoint(&prevHash, 0), nil))
+	spend.AddTxOut(wire.NewTxOut(900, disputeScript(4), wire.TokenData{}))
+	if spend.SerializeSize() == 64 {
+		t.Fatal("spending transaction is 64 bytes")
+	}
+	c.block = c.addBlock(spendHeight, coinbase, spend)
+	c.leaves = blockLeaves(t, c.block, [][]byte{script})
+	spent := -1
+	for i, leaf := range c.leaves {
+		if leaf.Kind == builder.ScriptLeafSpent {
+			spent = i
+			break
+		}
+	}
+	if spent < 0 {
+		t.Fatal("no spent leaf")
+	}
+	msg := c.honest().proof(uint32(spent))
+	if msg == nil || msg.Tx == nil || msg.PrevTx == nil || msg.PrevTx.SerializeSize() != 64 ||
+		msg.Tx.SerializeSize() == 64 {
+		t.Fatal("spent proof does not carry the 64-byte previous transaction")
+	}
+	spentProof := &scriptLeafProof{leaf: c.leaves[spent], msg: msg}
+	if !isTrueScriptLeaf(spentProof, &c.block.header, spendHeight, c.headers, heightP) {
+		t.Fatal("spend of a 64-byte transaction at smallTxUntil refused")
+	}
+	if isTrueScriptLeaf(spentProof, &c.block.header, spendHeight, c.headers, heightP-1) {
+		t.Fatal("spend of a 64-byte transaction above smallTxUntil accepted")
+	}
+}
+
+// TestSettleSmallTxLeaf checks that an honest peer whose tree holds the leaf
+// of a 64-byte transaction, in a block at smallTxUntil, is kept, and the peer
+// who leaves that leaf out is the one at fault.
+func TestSettleSmallTxLeaf(t *testing.T) {
+	const height = 20
+	script := []byte{0x51, 0x01, 0x02, 0x03}
+	small := mustTx64(t, script)
+	c := newBareDisputeChain()
+	other := wire.NewMsgTx(2)
+	other.AddTxIn(wire.NewTxIn(wire.NewOutPoint(&chainhash.Hash{0xab}, 0), nil))
+	other.AddTxOut(wire.NewTxOut(500, disputeScript(3), wire.TokenData{}))
+	// The 64-byte transaction is the coinbase, so its input needs no spent
+	// script.  The other transaction's input pays OP_RETURN and adds no leaf.
+	c.block = c.addBlock(height, small, other)
+	c.leaves = blockLeaves(t, c.block, [][]byte{{0x6a}})
+	c.smallTxUntil = height
+	if len(c.leaves) < 2 {
+		t.Fatalf("only %d leaves", len(c.leaves))
+	}
+	liar := c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
+		for i := range l {
+			if l[i].TxIndex == 0 {
+				return slices.Delete(l, i, i+1)
+			}
+		}
+		t.Fatal("no leaf of the 64-byte transaction")
+		return nil
+	})
+	bad := c.settle(map[string]*disputePeer{"honest": c.honest(), "liar": liar})
+	if !slices.Equal(bad, []string{"liar"}) {
+		t.Fatalf("peers at fault %v", bad)
+	}
+}
+
+// TestFetchScriptLeavesMost checks that the leaves of a tree are fetched while
+// it has no more of them than a block can give, and refused with one more.
+func TestFetchScriptLeavesMost(t *testing.T) {
+	c := newDisputeChain(t)
+	hash := c.block.header.BlockHash()
+	defer func(most func() uint64) { maxScriptLeaves = most }(maxScriptLeaves)
+
+	asked := 0
+	fetch := func() ([]builder.ScriptLeaf, error) {
+		p := c.honest()
+		return fetchScriptLeaves("peer", hash, builder.ScriptLeavesRoot(c.leaves),
+			func(_ string, bits uint16, prefix [32]byte) *wire.MsgCFRange {
+				asked++
+				return p.rangeOf(bits, prefix)
+			})
+	}
+
+	count := uint64(len(c.leaves))
+	maxScriptLeaves = func() uint64 { return count }
+	if leaves, err := fetch(); err != nil || !slices.Equal(leaves, c.leaves) {
+		t.Fatalf("as many leaves as a block gives: %d leaves, %v", len(leaves), err)
+	}
+
+	// The count comes with the first range, and no other is asked for.
+	maxScriptLeaves = func() uint64 { return count - 1 }
+	asked = 0
+	if _, err := fetch(); !errors.Is(err, errScriptProof) {
+		t.Fatalf("one leaf more than a block gives: got %v", err)
+	}
+	if asked != 1 {
+		t.Fatalf("%d ranges were asked for, want 1", asked)
 	}
 }
