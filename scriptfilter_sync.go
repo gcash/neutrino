@@ -9,7 +9,6 @@ import (
 
 	"github.com/aead/siphash"
 	"github.com/gcash/bchd/chaincfg/chainhash"
-	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
@@ -80,15 +79,14 @@ const (
 // keeps for us, once that leaves it at maxMempoolBanScore or below, and until
 // then waits for the score to decay.  It returns false when gone reports that
 // the peer left, or quit closes, before it could.
-func takeBanScore(score *connmgr.DynamicBanScore, add uint32, tick time.Duration,
+func takeBanScore(score *banScoreMirror, add uint32, tick time.Duration,
 	gone func() bool, quit <-chan struct{}) bool {
 
 	for {
 		if gone() {
 			return false
 		}
-		if score.Int()+add <= maxMempoolBanScore {
-			score.Increase(0, add)
+		if score.tryTake(add, add, maxMempoolBanScore) {
 			return true
 		}
 		select {

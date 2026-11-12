@@ -6,11 +6,18 @@ import (
 	"time"
 
 	"github.com/gcash/bchd/chaincfg"
-	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/integration/rpctest"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchwallet/walletdb"
 )
+
+// setMirrorScore sets the persistent and transient parts of m directly.  A
+// mirror counts a request only when the result still fits, so a test that
+// needs a score to start high, and to stay there, writes the persistent part
+// here.  That part does not decay.
+func setMirrorScore(m *banScoreMirror, persistent, transient uint32) {
+	m.score.Increase(persistent, transient)
+}
 
 // TestTakeBanScore checks that a request is counted toward the ban score a
 // peer keeps for us while the score has room for it, that one the score has
@@ -23,7 +30,7 @@ func TestTakeBanScore(t *testing.T) {
 
 	// A fresh score takes requests at once and counts each.  What is
 	// counted decays, a little within a second, so one may be gone again.
-	var fresh connmgr.DynamicBanScore
+	var fresh banScoreMirror
 	for i := 0; i < 5; i++ {
 		if !takeBanScore(&fresh, 1, tick, here, never) {
 			t.Fatalf("a fresh score did not take request %d", i+1)
@@ -35,16 +42,16 @@ func TestTakeBanScore(t *testing.T) {
 
 	// The last request the score has room for is taken.  The persistent
 	// part of a score doesn't decay, so the scores below stay as they are.
-	var last connmgr.DynamicBanScore
-	last.Increase(maxMempoolBanScore-1, 0)
+	var last banScoreMirror
+	setMirrorScore(&last, maxMempoolBanScore-1, 0)
 	if !takeBanScore(&last, 1, tick, here, never) {
 		t.Fatal("the last request the score has room for was not taken")
 	}
 
 	// A request the score has no room for waits, and gives up when we
 	// shut down, without counting.
-	var full connmgr.DynamicBanScore
-	full.Increase(maxMempoolBanScore, 0)
+	var full banScoreMirror
+	setMirrorScore(&full, maxMempoolBanScore, 0)
 	quit := make(chan struct{})
 	result := make(chan bool, 1)
 	go func() { result <- takeBanScore(&full, 1, tick, here, quit) }()
@@ -68,7 +75,7 @@ func TestTakeBanScore(t *testing.T) {
 	}
 
 	// It gives up when the peer has left, even with room in the score.
-	var left connmgr.DynamicBanScore
+	var left banScoreMirror
 	gone := func() bool { return true }
 	if takeBanScore(&left, 1, tick, gone, never) {
 		t.Fatal("a request was taken for a peer that left")
@@ -79,8 +86,8 @@ func TestTakeBanScore(t *testing.T) {
 
 	// A score that decays makes room: the transient part halves every
 	// minute, counted in whole seconds, so the next second is enough here.
-	var decaying connmgr.DynamicBanScore
-	decaying.Increase(0, maxMempoolBanScore)
+	var decaying banScoreMirror
+	setMirrorScore(&decaying, 0, maxMempoolBanScore)
 	go func() { result <- takeBanScore(&decaying, 1, tick, here, never) }()
 	select {
 	case took := <-result:

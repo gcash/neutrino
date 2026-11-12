@@ -178,9 +178,10 @@ type ServerPeer struct {
 
 	// mempoolScore mirrors the ban score that the peer keeps for us, for
 	// our requests for its mempool and for the leaves and proofs of a
-	// script filter's entry tree, so that we never ask it once more than
-	// its score lets us without being banned.
-	mempoolScore connmgr.DynamicBanScore
+	// script filter's entry tree. The check that one more still fits and
+	// the add that counts it are one step, so two senders cannot each see
+	// room and together pass the score the peer bans at.
+	mempoolScore banScoreMirror
 
 	// bytesIn counts the bytes read from the peer's connection as they
 	// arrive, those of a message not yet whole too, so that a peer slow to
