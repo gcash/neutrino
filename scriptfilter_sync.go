@@ -9,6 +9,7 @@ import (
 
 	"github.com/aead/siphash"
 	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/connmgr"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchutil/gcs"
@@ -65,11 +66,64 @@ func (s *ChainService) askPeer(peer string, request wire.Message,
 	}
 }
 
+const (
+	// scriptTreeBanScore is what bchd adds to the ban score it keeps for
+	// a peer for each getcfrange and each getcfproof.
+	scriptTreeBanScore = 1
+
+	// scriptTreeScoreTick is how often a request that waits for the ban
+	// score a peer keeps for us to decay looks at it again.
+	scriptTreeScoreTick = time.Second
+)
+
+// takeBanScore counts add toward score, which mirrors the ban score a peer
+// keeps for us, once that leaves it at maxMempoolBanScore or below, and until
+// then waits for the score to decay.  It returns false when gone reports that
+// the peer left, or quit closes, before it could.
+func takeBanScore(score *connmgr.DynamicBanScore, add uint32, tick time.Duration,
+	gone func() bool, quit <-chan struct{}) bool {
+
+	for {
+		if gone() {
+			return false
+		}
+		if score.Int()+add <= maxMempoolBanScore {
+			score.Increase(0, add)
+			return true
+		}
+		select {
+		case <-time.After(tick):
+		case <-quit:
+			return false
+		}
+	}
+}
+
+// takeScriptTreeScore counts one getcfrange or getcfproof toward the ban
+// score a peer keeps for us, and waits while one more would get us banned.
+// Peers that disagree are each asked for a proof at every level of a block's
+// entry tree, and one that makes up disagreements could otherwise have an
+// honest peer ban us for the proofs we then ask it for.  It returns false when
+// the peer is gone or we are shutting down.
+func (s *ChainService) takeScriptTreeScore(peer string, quit <-chan struct{}) bool {
+	sp := s.PeerByAddr(peer)
+	if sp == nil {
+		return false
+	}
+	return takeBanScore(
+		&sp.mempoolScore, scriptTreeBanScore, scriptTreeScoreTick,
+		func() bool { return !sp.Connected() }, quit,
+	)
+}
+
 // fetchScriptProof asks one peer for the cfproof of a leaf of a block's
 // script filter entry tree.  It returns nil when the peer doesn't answer.
 func (s *ChainService) fetchScriptProof(peer string, blockHash chainhash.Hash,
 	index uint32, quit <-chan struct{}) *wire.MsgCFProof {
 
+	if !s.takeScriptTreeScore(peer, quit) {
+		return nil
+	}
 	msg := s.askPeer(
 		peer, wire.NewMsgGetCFProof(wire.GCSFilterScripts, &blockHash, index),
 		func(msg wire.Message) bool {
@@ -86,6 +140,10 @@ func (s *ChainService) fetchScriptProof(peer string, blockHash chainhash.Hash,
 // doesn't answer.
 func (s *ChainService) fetchScriptRange(peer string, blockHash chainhash.Hash,
 	bits uint16, prefix [32]byte, quit <-chan struct{}) *wire.MsgCFRange {
+
+	if !s.takeScriptTreeScore(peer, quit) {
+		return nil
+	}
 
 	// A cfrange doesn't repeat the prefix it answers.  We ask a peer for
 	// one range at a time, so the next cfrange for the block is the
