@@ -296,6 +296,7 @@ func TestBlockCache(t *testing.T) {
 		BlockCache:       lru.NewCache(size),
 		BlockHeaders:     headers,
 		RegFilterHeaders: cfStore,
+		filterHeaders:    cfStore,
 		chainParams: chaincfg.Params{
 			PowLimit: maxPowLimit,
 		},
@@ -485,6 +486,7 @@ func TestGetCFilterNotFetched(t *testing.T) {
 			FilterCache:      lru.NewCache(1000),
 			BlockHeaders:     hdrStore,
 			RegFilterHeaders: cfStore,
+			filterHeaders:    cfStore,
 			quit:             make(chan struct{}),
 		}
 
