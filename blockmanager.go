@@ -3756,7 +3756,8 @@ func (b *blockManager) NotificationsSinceHeight(
 	// caller.
 	if height > bestHeight {
 		return nil, 0, fmt.Errorf("request with height %d is greater "+
-			"than best height known %d", height, bestHeight)
+			"than best height known %d: %w", height, bestHeight,
+			blockntfns.ErrHeightNotReached)
 	}
 
 	// Otherwise, we need to read block headers from disk to deliver a

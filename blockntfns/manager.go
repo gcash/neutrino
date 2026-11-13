@@ -14,6 +14,12 @@ var (
 	// register a new block subscription but the manager has been stopped.
 	ErrSubscriptionManagerStopped = errors.New("subscription manager was " +
 		"stopped")
+
+	// ErrHeightNotReached is an error returned when we attempt to
+	// register a new block subscription from a height the block source's
+	// notifications haven't reached yet.
+	ErrHeightNotReached = errors.New("block notifications have not " +
+		"reached the height")
 )
 
 // newSubscription is an internal message used within the SubscriptionManager to
@@ -282,7 +288,7 @@ func (m *SubscriptionManager) handleNewSubscription(sub *newSubscription) error 
 	)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve blocks since height=%d: "+
-			"%v", sub.bestHeight, err)
+			"%w", sub.bestHeight, err)
 	}
 
 	// We'll then attempt to deliver these notifications.
