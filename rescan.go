@@ -278,6 +278,11 @@ const (
 	// us when they're behind.
 	blockRetryInterval = 100 * time.Millisecond
 
+	// subscribeRetryInterval is how long a rescan waits before it asks
+	// again to follow the chain from a block the block notifications
+	// haven't reached yet.
+	subscribeRetryInterval = 50 * time.Millisecond
+
 	// maxBlockRetryInterval is the longest we'll wait before we try a
 	// block again.
 	maxBlockRetryInterval = 30 * time.Second
@@ -463,9 +468,30 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		log.Debugf("Waiting to catch up to the rescan start height=%d "+
 			"from height=%d", curStamp.Height, bestBlock.Height)
 
-		blockSubscription, err := chain.Subscribe(
-			uint32(bestBlock.Height),
-		)
+		// The filter headers are stored a moment before the block
+		// notifications reach them, and the best block is read from
+		// the store, so the notifications might not have reached it
+		// yet. We'll ask again until they have, taking updates in the
+		// meantime to prevent blocking the client.
+		var blockSubscription *blockntfns.Subscription
+		for {
+			blockSubscription, err = chain.Subscribe(
+				uint32(bestBlock.Height),
+			)
+			if !errors.Is(err, blockntfns.ErrHeightNotReached) {
+				break
+			}
+
+			select {
+			case update := <-ro.update:
+				updates = append(updates, update)
+
+			case <-ro.quit:
+				return ErrRescanExit
+
+			case <-time.After(subscribeRetryInterval):
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -1019,6 +1045,25 @@ rescanLoop:
 					uint32(curStamp.Height),
 				)
 				if err != nil && filterHeadersBehind() {
+					continue rescanLoop
+				}
+
+				// The filter headers are stored a moment before
+				// the block notifications reach them, and the
+				// best block we compared ours with is read from
+				// the store. If the notifications haven't
+				// reached our block yet, we'll wait and try
+				// again.
+				if errors.Is(err, blockntfns.ErrHeightNotReached) {
+					err := waitForRetry(
+						chain, ro, &curStamp, &curHeader,
+						subscribeRetryInterval,
+						filterRollbacks, rewindTo,
+					)
+					if err != nil {
+						return err
+					}
+
 					continue rescanLoop
 				}
 				if err != nil {

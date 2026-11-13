@@ -2,6 +2,7 @@ package blockntfns_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -221,6 +222,20 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected registration to fail due to not delivering " +
 			"backlog")
+	}
+
+	// A source whose notifications haven't reached the height asked for
+	// should say so in a way the client can tell from other failures, as
+	// it can ask again then.
+	blockSource.blocksSinceHeight = func(uint32) ([]blockntfns.BlockNtfn,
+		uint32, error) {
+
+		return nil, 0, fmt.Errorf("request with height 5: %w",
+			blockntfns.ErrHeightNotReached)
+	}
+	_, err = subMgr.NewSubscription(5)
+	if !errors.Is(err, blockntfns.ErrHeightNotReached) {
+		t.Fatalf("expected ErrHeightNotReached, got %v", err)
 	}
 
 	// We'll go with the assumption that the tip of the chain is at height

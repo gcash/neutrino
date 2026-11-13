@@ -3,6 +3,7 @@ package neutrino
 import (
 	"container/list"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -1609,6 +1610,14 @@ func TestRollBackToHeightDisconnectedHeights(t *testing.T) {
 		t.Fatalf("a block subscriber at height %d is handed %d blocks "+
 			"up to height %d, expected none", rollBackTo,
 			len(backlog), bestHeight)
+	}
+
+	// A block subscriber from above the tip is told the notifications
+	// haven't reached its height, so that it can ask again.
+	_, _, err = bm.NotificationsSinceHeight(rollBackTo + 1)
+	if !errors.Is(err, blockntfns.ErrHeightNotReached) {
+		t.Fatalf("expected ErrHeightNotReached from above the tip, "+
+			"got %v", err)
 	}
 }
 

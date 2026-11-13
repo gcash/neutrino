@@ -1822,3 +1822,90 @@ func TestRescanConnectedBlockFilterEnds(t *testing.T) {
 		t.Fatalf("quit %v, retries %d", qo.quit, qo.numRetries)
 	}
 }
+
+// notReachedThenSubscribed returns a Subscribe override for the mock chain that
+// fails the given number of times as the block notifications haven't reached
+// the height asked for, and subscribes after that.
+func notReachedThenSubscribed(chain *mockChainSource,
+	failures int) func(uint32) (*blockntfns.Subscription, error) {
+
+	// The mock chain's mutex is held while the override runs.
+	return func(height uint32) (*blockntfns.Subscription, error) {
+		if failures > 0 {
+			failures--
+			return nil, fmt.Errorf("request with height %d: %w",
+				height, blockntfns.ErrHeightNotReached)
+		}
+
+		return &blockntfns.Subscription{
+			Notifications: chain.ntfnChan,
+			Cancel:        func() {},
+		}, nil
+	}
+}
+
+// TestRescanSubscribesOnceNotificationsReachItsBlock ensures that a rescan
+// that has caught up with a block the block notifications haven't reached yet,
+// as the filter headers are stored a moment before they do, asks to follow the
+// chain from it again rather than ending.
+func TestRescanSubscribesOnceNotificationsReachItsBlock(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRollbackTestContext(t, time.Time{})
+	defer ctx.stop()
+
+	block := ctx.scanNewBlock()
+
+	// An invalid block prompts the rescan to catch up with the chain
+	// manually, and the notifications haven't reached its block the first
+	// three times it asks to follow them.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.overrideSubscribe(notReachedThenSubscribed(ctx.chain, 3))
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+	for i := 0; i < 4; i++ {
+		ctx.assertSubscribed(subscriptions, block.Height)
+	}
+	ctx.assertNotSubscribed(subscriptions)
+	ctx.assertRunning()
+
+	// It follows the chain from there.
+	ctx.scanNewBlock()
+}
+
+// TestRescanStartSubscribesOnceNotificationsReachBestBlock ensures that a
+// rescan that starts above the best block, and so follows the chain from the
+// best block until it has reached its own, asks again when the block
+// notifications haven't reached the best block yet rather than ending.
+func TestRescanStartSubscribesOnceNotificationsReachBestBlock(t *testing.T) {
+	t.Parallel()
+
+	const chainTip = 9
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartBlock(&waddrmgr.BlockStamp{Height: chainTip}),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+
+	// The filter headers are at height 5, below the block the rescan starts
+	// from, so it follows the chain from there first.
+	subscriptions := ctx.chain.watchSubscriptions()
+	ctx.chain.rollBackFilterHeaders(5, false)
+	ctx.chain.overrideSubscribe(notReachedThenSubscribed(ctx.chain, 2))
+	ctx.start(false)
+	defer ctx.stop()
+
+	for i := 0; i < 3; i++ {
+		ctx.assertSubscribed(subscriptions, 5)
+	}
+	ctx.assertNotSubscribed(subscriptions)
+	ctx.assertRunning()
+
+	// Once the filter headers have reached its block, it follows the chain
+	// from that one.
+	for height := int32(6); height <= chainTip; height++ {
+		ctx.chain.syncFilterHeader(true)
+	}
+	ctx.assertSubscribed(subscriptions, chainTip)
+	ctx.scanNewBlock()
+}
