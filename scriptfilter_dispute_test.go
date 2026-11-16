@@ -277,8 +277,8 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 	for _, leaf := range c.leaves {
 		kinds[leaf.Kind]++
 	}
-	if len(kinds) != 4 {
-		t.Fatalf("the block lacks a kind of leaf: %v", kinds)
+	if len(kinds) != 5 || kinds[builder.ScriptLeafTransaction] != len(c.block.txs) {
+		t.Fatalf("the block lacks a kind of leaf, or a transaction its ID: %v", kinds)
 	}
 
 	check := func(name string, liar *disputePeer) {
@@ -296,8 +296,8 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 		}
 	}
 
-	// Every leaf left out, in turn: outputs, spent outputs and token
-	// categories of both.
+	// Every leaf left out, in turn: outputs, spent outputs, token
+	// categories of both, and transaction IDs.
 	for i := range c.leaves {
 		check(fmt.Sprintf("leaf %d (kind %d) left out", i, c.leaves[i].Kind),
 			c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
@@ -320,7 +320,7 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 	// A leaf for a script the block doesn't have, pointing at a real
 	// output, then at a real input.
 	for _, kind := range []builder.ScriptLeafKind{builder.ScriptLeafOutput, builder.ScriptLeafSpent,
-		builder.ScriptLeafOutputCategory, builder.ScriptLeafSpentCategory} {
+		builder.ScriptLeafOutputCategory, builder.ScriptLeafSpentCategory, builder.ScriptLeafTransaction} {
 
 		for _, first := range []byte{0x00, 0x7f, 0xff} {
 			check(fmt.Sprintf("made-up leaf of kind %d, key %x..", kind, first),
@@ -331,6 +331,25 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 				}))
 		}
 	}
+
+	// A leaf of a transaction's ID that holds the ID of another transaction
+	// of the block, and a tree without any leaf of a transaction's ID, as a
+	// node serves that builds the filter without them.
+	check("a transaction's leaf with another one's ID", c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
+		for i := range l {
+			if l[i].Kind == builder.ScriptLeafTransaction && l[i].TxIndex == 1 {
+				l[i].Key = builder.TxidKey(*c.block.txs[2].Hash())
+				return l
+			}
+		}
+		t.Fatal("no leaf of the ID of transaction 1")
+		return nil
+	}))
+	check("no leaves of transaction IDs", c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
+		return slices.DeleteFunc(l, func(leaf builder.ScriptLeaf) bool {
+			return leaf.Kind == builder.ScriptLeafTransaction
+		})
+	}))
 
 	// A true leaf twice, and two leaves in the wrong order.
 	check("a leaf repeated", c.liar(false, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
@@ -949,22 +968,27 @@ func TestIsTrueScriptLeafSmallTx(t *testing.T) {
 	const heightH = 5
 	funded := c.addBlock(heightH, small)
 	fundLeaves := blockLeaves(t, funded, nil)
-	if len(fundLeaves) != 1 {
-		t.Fatalf("%d leaves in the 64-byte transaction's block", len(fundLeaves))
+	if len(fundLeaves) != 2 {
+		t.Fatalf("%d leaves in the 64-byte transaction's block, want its output and its ID",
+			len(fundLeaves))
 	}
-	outProof := &scriptLeafProof{
-		leaf: fundLeaves[0],
-		msg: &wire.MsgCFProof{
-			Leaf:     wire.CFLeaf(fundLeaves[0].Bytes()),
-			Tx:       small,
-			TxBranch: blockchain.MerkleBranch(funded.merkles, 0),
-		},
-	}
-	if !isTrueScriptLeaf(outProof, &funded.header, heightH, c.headers, heightH) {
-		t.Fatal("64-byte transaction at smallTxUntil refused")
-	}
-	if isTrueScriptLeaf(outProof, &funded.header, heightH, c.headers, heightH-1) {
-		t.Fatal("64-byte transaction above smallTxUntil accepted")
+	// The leaf of the output and the leaf of the transaction's ID are both
+	// judged by the transaction's size.
+	for _, leaf := range fundLeaves {
+		proof := &scriptLeafProof{
+			leaf: leaf,
+			msg: &wire.MsgCFProof{
+				Leaf:     wire.CFLeaf(leaf.Bytes()),
+				Tx:       small,
+				TxBranch: blockchain.MerkleBranch(funded.merkles, 0),
+			},
+		}
+		if !isTrueScriptLeaf(proof, &funded.header, heightH, c.headers, heightH) {
+			t.Fatalf("leaf of kind %d of a 64-byte transaction at smallTxUntil refused", leaf.Kind)
+		}
+		if isTrueScriptLeaf(proof, &funded.header, heightH, c.headers, heightH-1) {
+			t.Fatalf("leaf of kind %d of a 64-byte transaction above smallTxUntil accepted", leaf.Kind)
+		}
 	}
 
 	// P is the block of the 64-byte transaction a later block spends.
