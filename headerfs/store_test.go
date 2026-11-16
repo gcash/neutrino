@@ -15,6 +15,7 @@ import (
 	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/walletdb"
 )
 
@@ -754,4 +755,84 @@ func TestFilterHeaderStoreRollbackToHeight(t *testing.T) {
 		t.Fatalf("unable to open the store again: %v", err)
 	}
 	assertTip(fhs, filterHeaders[numHeaders-1])
+}
+
+// TestScriptFilterHeaderStore checks that the headers of script filters are
+// kept in a file and under a tip of their own, beside those of regular
+// filters in the same directory and database, and start from the header of
+// the genesis block's script filter.
+func TestScriptFilterHeaderStore(t *testing.T) {
+	cleanUp, db, tempDir, regStore, err := createTestFilterHeaderStore()
+	if cleanUp != nil {
+		defer cleanUp()
+	}
+	if err != nil {
+		t.Fatalf("unable to create new filter header store: %v", err)
+	}
+	scriptStore, err := NewFilterHeaderStore(
+		tempDir, db, ScriptFilter, &chaincfg.SimNetParams, nil,
+	)
+	if err != nil {
+		t.Fatalf("unable to create the script filter header store: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, "script_filter_headers.bin")); err != nil {
+		t.Fatalf("no file for script filter headers: %v", err)
+	}
+
+	// The block headers are written before the filter headers, so the
+	// index knows the height of each block: the genesis block's and those
+	// of the headers written below.
+	headers := createTestFilterHeaderChain(5)
+	if err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+		err := rootBucket.Put(chaincfg.SimNetParams.GenesisHash[:], make([]byte, 4))
+		if err != nil {
+			return err
+		}
+		for _, header := range headers {
+			// The database keeps the slice until the transaction
+			// ends, so each height has its own.
+			var heightBytes [4]byte
+			binary.BigEndian.PutUint32(heightBytes[:], header.Height)
+			if err := rootBucket.Put(header.HeaderHash[:], heightBytes[:]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("unable to pre-load block index: %v", err)
+	}
+
+	genesis := chaincfg.SimNetParams.GenesisBlock
+	filter, root, err := builder.BuildScriptFilter(genesis, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := builder.MakeHeaderForScriptFilter(filter, root, chainhash.Hash{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptTip, height, err := scriptStore.ChainTip()
+	if err != nil || height != 0 || *scriptTip != want {
+		t.Fatalf("script filter tip %v at %d, %v; want %v", scriptTip, height, err, want)
+	}
+	regTip, _, err := regStore.ChainTip()
+	if err != nil || *regTip == *scriptTip {
+		t.Fatalf("regular filter tip %v, %v", regTip, err)
+	}
+
+	// Headers written to one store leave the other's tip where it was.
+	if err := scriptStore.WriteHeaders(headers...); err != nil {
+		t.Fatalf("unable to write script filter headers: %v", err)
+	}
+	scriptTip, height, err = scriptStore.ChainTip()
+	if err != nil || height != 5 || *scriptTip != headers[4].FilterHash {
+		t.Errorf("script filter tip %v at %d, %v", scriptTip, height, err)
+	}
+	if tip, height, err := regStore.ChainTip(); err != nil || height != 0 || *tip != *regTip {
+		t.Errorf("regular filter tip moved to %v at %d, %v", tip, height, err)
+	}
+	if header, err := scriptStore.FetchHeaderByHeight(3); err != nil || *header != headers[2].FilterHash {
+		t.Errorf("script filter header at height 3: %v, %v", header, err)
+	}
 }
