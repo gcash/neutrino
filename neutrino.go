@@ -24,6 +24,7 @@ import (
 	"github.com/gcash/bchd/txscript"
 	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
+	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/walletdb"
 	"github.com/gcash/neutrino/banman"
@@ -177,9 +178,11 @@ type ServerPeer struct {
 	quit     chan struct{}
 
 	// mempoolScore mirrors the ban score that the peer keeps for us, for
-	// our requests for its mempool, so that we never ask it once more
-	// than its score lets us without being banned.
-	mempoolScore connmgr.DynamicBanScore
+	// our requests for its mempool and for the leaves and proofs of a
+	// script filter's entry tree. The check that one more still fits and
+	// the add that counts it are one step, so two senders cannot each see
+	// room and together pass the score the peer bans at.
+	mempoolScore banScoreMirror
 
 	// bytesIn counts the bytes read from the peer's connection as they
 	// arrive, those of a message not yet whole too, so that a peer slow to
@@ -373,6 +376,111 @@ func (sp *ServerPeer) OnTx(_ *peer.Peer, msg *wire.MsgTx) {
 		return
 	}
 	sp.server.blockManager.QueueTx(bchutil.NewTx(msg), sp)
+}
+
+// deliverMempoolTx takes a transaction of a mempool interval we asked for.
+// An interval asked again after its answer was lost can bring a transaction
+// we already have, which is not reported again.
+func (s *ChainService) deliverMempoolTx(tx *bchutil.Tx) {
+	if s.mempool.HaveTransaction(tx.Hash()) {
+		return
+	}
+	s.mempool.AddTransaction(tx)
+}
+
+// OnMpFilter is invoked when a peer sends the script filter of one interval
+// of transactions it admitted to its mempool.  Only the feed peer is kept.
+// Pending intervals are then asked for while the ban score allows.
+func (sp *ServerPeer) OnMpFilter(_ *peer.Peer, msg *wire.MsgMpFilter) {
+	s := sp.server
+	m := s.mempoolIntervals
+	if m == nil {
+		return
+	}
+	if err := m.onFilter(sp.ID(), msg); err != nil {
+		s.banMempoolInterval(sp, err)
+		return
+	}
+	s.askMempoolIntervals()
+}
+
+// OnMpTxs is invoked when a peer sends the transactions of an interval of its
+// mempool.  A message that is not what the peer announced bans and
+// disconnects the peer.
+func (sp *ServerPeer) OnMpTxs(_ *peer.Peer, msg *wire.MsgMpTxs) {
+	s := sp.server
+	m := s.mempoolIntervals
+	if m == nil {
+		return
+	}
+	if err := m.onTxs(sp.ID(), msg); err != nil {
+		s.banMempoolInterval(sp, err)
+	}
+}
+
+// banMempoolInterval bans and disconnects a feed that sent a mempool interval
+// that is not what it announced.  A disconnect alone would let the peer come
+// back and send it again, and a made-up count on a large interval is how a
+// peer would probe which interval matched.
+func (s *ChainService) banMempoolInterval(sp *ServerPeer, err error) {
+	log.Warnf("Banning peer %v: %v", sp, err)
+	banErr := s.BanPeer(sp.Addr(), banman.InvalidMempoolInterval)
+	if banErr != nil {
+		log.Errorf("Unable to ban peer %v: %v", sp, banErr)
+	}
+	sp.Disconnect()
+}
+
+// askMempoolIntervals sends the feed a getmptxs for each pending run the ban
+// score allows.  It does nothing when the feed is gone.  The check that the
+// score has room and the add that counts the request are one step.
+func (s *ChainService) askMempoolIntervals() {
+	m := s.mempoolIntervals
+	if m == nil {
+		return
+	}
+	id, ok := m.feed()
+	if !ok {
+		return
+	}
+	var sp *ServerPeer
+	for _, peer := range s.Peers() {
+		if peer.ID() == id {
+			sp = peer
+			break
+		}
+	}
+	if sp == nil {
+		return
+	}
+	for {
+		get := m.next(func() bool {
+			return sp.mempoolScore.tryTake(mpTxsBanScore, mpTxsBanScore,
+				maxMempoolBanScore)
+		})
+		if get == nil {
+			return
+		}
+		sp.QueueMessage(get, nil)
+	}
+}
+
+// serveMempoolIntervals asks the feed for pending intervals once a second
+// until the service stops.  A match the score could not take when its filter
+// arrived is fetched once the score has decayed, even if no later interval
+// comes.
+func (s *ChainService) serveMempoolIntervals() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(mpIntervalTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.askMempoolIntervals()
+		case <-s.quit:
+			return
+		}
+	}
 }
 
 // OnHeaders is invoked when a peer receives a headers bitcoin
@@ -584,6 +692,23 @@ type Config struct {
 	// current on disk filter headers to sync them anew.
 	AssertFilterHeader *headerfs.FilterHeader
 
+	// FilterType is the type of the filters the ChainService syncs and
+	// matches: the regular filter by default, or wire.GCSFilterScripts
+	// for the script filter, which lists the scripts of the outputs a
+	// block creates and spends and the token categories of both.  Peers
+	// that don't serve the type are disconnected.
+	FilterType wire.FilterType
+
+	// MempoolFetchFloor is how many transactions an interval of mempool
+	// transactions must hold before its filter is consulted.  An interval
+	// with fewer transactions than this is always downloaded, as a wallet
+	// on regular filters downloads every transaction.  One with this many
+	// or more is downloaded only when its filter matches something the
+	// wallet watches, which tells the peer that one of that many
+	// transactions is of interest.  A larger value gives more privacy and
+	// more data.  Zero means the default.
+	MempoolFetchFloor uint32
+
 	// BroadcastTimeout is the amount of time we'll wait before giving up on
 	// a transaction broadcast attempt. Broadcasting transactions consists
 	// of three steps:
@@ -595,6 +720,18 @@ type Config struct {
 	//
 	// If this is zero or negative, pushtx.DefaultBroadcastTimeout is used.
 	BroadcastTimeout time.Duration
+}
+
+// FilterType returns the type of the filters the ChainService syncs.
+func (s *ChainService) FilterType() wire.FilterType {
+	return s.filterType
+}
+
+// FilterHeaders returns the store of the filter headers the ChainService
+// syncs: RegFilterHeaders, or ScriptFilterHeaders when it syncs script
+// filters.
+func (s *ChainService) FilterHeaders() *headerfs.FilterHeaderStore {
+	return s.filterHeaders
 }
 
 // ChainService is instantiated with functional options
@@ -610,6 +747,15 @@ type ChainService struct {
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
 	persistToDisk    bool
+
+	// ScriptFilterHeaders holds the filter headers when the service syncs
+	// script filters, in place of RegFilterHeaders, which is then nil.
+	ScriptFilterHeaders *headerfs.FilterHeaderStore
+
+	// filterType is the type of the filters we sync, and filterHeaders
+	// the store of their headers: one of the two above.
+	filterType    wire.FilterType
+	filterHeaders *headerfs.FilterHeaderStore
 
 	FilterCache *lru.Cache
 	BlockCache  *lru.Cache
@@ -665,6 +811,13 @@ type ChainService struct {
 	// mempoolRequests asks our peers for the transactions in their
 	// mempools that RequestMempoolFilter asks for.
 	mempoolRequests *mempoolRequester
+
+	// mempoolIntervals learns of unconfirmed transactions from the script
+	// filters one feed peer sends for each short interval of its mempool,
+	// when we sync script filters.  It is nil for a service that syncs
+	// regular filters, which hears of them from the filter of the whole
+	// mempool and from announcements, and nil in blocks only mode.
+	mempoolIntervals *mempoolIntervals
 
 	proxy string
 
@@ -773,12 +926,22 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter,
+	headerType, err := headerTypeOf(cfg.FilterType)
+	if err != nil {
+		return nil, err
+	}
+	s.filterType = cfg.FilterType
+	s.filterHeaders, err = headerfs.NewFilterHeaderStore(
+		cfg.DataDir, cfg.Database, headerType,
 		&cfg.ChainParams, cfg.AssertFilterHeader,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if s.filterType == wire.GCSFilterScripts {
+		s.ScriptFilterHeaders = s.filterHeaders
+	} else {
+		s.RegFilterHeaders = s.filterHeaders
 	}
 
 	bm, err := newBlockManager(&s, s.firstPeerConnect)
@@ -838,11 +1001,19 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.mempoolRequests = newMempoolRequester(s.Peers, func() bool {
 		return s.blockManager.BlockHeadersSynced()
 	}, s.quit)
+	s.mempoolRequests.filterType = s.filterType
+	// Interval filters take the place of transaction announcements.  A
+	// service that only wants blocks asks for neither.
+	if s.filterType == wire.GCSFilterScripts && !s.blocksOnly {
+		s.mempoolIntervals = newMempoolIntervals(cfg.MempoolFetchFloor,
+			s.mempoolRequests.entryList, s.deliverMempoolTx, time.Now)
+	}
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
 		BestSnapshot: s.BestBlock,
 		GetBlockHash: s.GetBlockHash,
 		GetBlock:     s.GetBlock,
+		FilterType:   s.filterType,
 		BlockFilterMatches: func(ro *rescanOptions,
 			blockHash *chainhash.Hash) (bool, error) {
 
@@ -878,7 +1049,7 @@ func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 		return nil, err
 	}
 
-	_, filterHeight, err := s.RegFilterHeaders.ChainTip()
+	_, filterHeight, err := s.filterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
@@ -1019,6 +1190,25 @@ func (s *ChainService) RequestMempoolFilter(addrs []bchutil.Address,
 		return
 	}
 
+	// A script filter holds the script of each output a transaction
+	// spends, not the outpoint, and a wallet's outpoints pay its own
+	// addresses, which are watched already.
+	if s.filterType == wire.GCSFilterScripts {
+		entries := make([][]byte, 0, len(addrs))
+		for _, addr := range addrs {
+			script, err := txscript.PayToAddrScript(addr)
+			if err != nil {
+				log.Errorf("Unable to watch %v in the mempool: %v", addr,
+					err)
+				continue
+			}
+			key := builder.ScriptKey(script)
+			entries = append(entries, key[:])
+		}
+		s.mempoolRequests.request(entries)
+		return
+	}
+
 	// The filter of a mempool holds the scripts that its transactions pay
 	// and the outpoints that they spend.
 	entries := make([][]byte, 0, len(addrs)+len(outPoints))
@@ -1056,7 +1246,7 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		Timestamp: header.Timestamp,
 	}
 
-	_, regHeight, err := s.RegFilterHeaders.ChainTip()
+	_, regHeight, err := s.filterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
@@ -1071,7 +1261,7 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 
 		// Only roll back filter headers if they've caught up this far.
 		if uint32(bs.Height) <= regHeight {
-			newFilterTip, err := s.RegFilterHeaders.RollbackLastBlock(newTip)
+			newFilterTip, err := s.filterHeaders.RollbackLastBlock(newTip)
 			if err != nil {
 				return nil, err
 			}
@@ -1316,6 +1506,21 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	// Signal the block manager this peer is a new sync candidate.
 	s.blockManager.NewPeer(sp)
 
+	// A peer that doesn't serve the script filters we sync is of no use.
+	if s.filterType == wire.GCSFilterScripts {
+		go s.probeScriptFilters(sp)
+	}
+
+	// Only the feed is asked for interval filters.  The first peer we have
+	// becomes the feed.  Another peer is not asked, so it never sees which
+	// intervals we download.
+	if s.mempoolIntervals != nil {
+		if _, ok := s.mempoolIntervals.feed(); !ok && sp.ID() > 0 {
+			s.mempoolIntervals.setFeed(sp.ID())
+			sp.QueueMessage(wire.NewMsgSendMpFilter(wire.GCSFilterScripts), nil)
+		}
+	}
+
 	// Update the address manager and request known addresses from the
 	// remote peer for outbound connections. This is skipped when running on
 	// a development network since it is only intended to connect to
@@ -1357,6 +1562,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		}
 		delete(list, sp.ID())
 		log.Debugf("Removed peer %s", sp)
+		s.doneMempoolFeed(state, sp)
 		return
 	}
 
@@ -1372,7 +1578,45 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	}
 
 	// If we get here it means that either we didn't know about the peer
-	// or we purposefully deleted it.
+	// or we purposefully deleted it.  A peer removed by a disconnect
+	// request never reaches the delete above.  If it was the feed, its
+	// intervals still go.
+	s.doneMempoolFeed(state, sp)
+}
+
+// doneMempoolFeed drops the feed's intervals when sp was the feed, asks
+// another connected peer to send interval filters, and asks again for the
+// filter of the whole mempool so transactions admitted during the change are
+// found.  The peer set is the one handleDonePeerMsg already holds.  Asking
+// Peers for it would wait on this same goroutine, which is the one that
+// answers that query.
+func (s *ChainService) doneMempoolFeed(state *peerState, sp *ServerPeer) {
+	m := s.mempoolIntervals
+	if m == nil || sp == nil {
+		return
+	}
+	id, ok := m.feed()
+	if !ok || id != sp.ID() {
+		return
+	}
+	var next *ServerPeer
+	state.forAllPeers(func(p *ServerPeer) {
+		if next != nil || p.ID() == sp.ID() || !p.Connected() || p.ID() <= 0 {
+			return
+		}
+		next = p
+	})
+	if next == nil {
+		m.setFeed(0)
+		log.Debugf("Peer %s was the mempool interval feed, and no peer is left", sp)
+	} else {
+		m.setFeed(next.ID())
+		next.QueueMessage(wire.NewMsgSendMpFilter(wire.GCSFilterScripts), nil)
+		log.Debugf("Peer %s is the mempool interval feed", next)
+	}
+	if s.mempoolRequests != nil {
+		s.mempoolRequests.want()
+	}
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
@@ -1425,6 +1669,8 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			OnRead:      sp.OnRead,
 			OnWrite:     sp.OnWrite,
 			OnTx:        sp.OnTx,
+			OnMpFilter:  sp.OnMpFilter,
+			OnMpTxs:     sp.OnMpTxs,
 			OnNotFound:  sp.OnNotFound,
 		},
 		NewestBlock:      sp.newestBlock,
@@ -1434,8 +1680,11 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 		ChainParams:      &sp.server.chainParams,
 		Services:         sp.server.services,
 		ProtocolVersion:  wire.FeeFilterVersion,
-		DisableRelayTx:   sp.server.blocksOnly,
-		Proxy:            sp.server.proxy,
+		// The interval filters tell us of the transactions we watch, so
+		// peers needn't announce every transaction.
+		DisableRelayTx: sp.server.blocksOnly ||
+			sp.server.filterType == wire.GCSFilterScripts,
+		Proxy: sp.server.proxy,
 	}
 }
 
@@ -1666,6 +1915,13 @@ func (s *ChainService) Start() error {
 		s.mempoolRequests.run()
 	}()
 
+	// Regular filters and blocks only mode have no interval feed, so they
+	// grow no goroutine here.
+	if s.mempoolIntervals != nil {
+		s.wg.Add(1)
+		go s.serveMempoolIntervals()
+	}
+
 	return nil
 }
 
@@ -1696,8 +1952,8 @@ func (s *ChainService) Stop() error {
 			log.Errorf("Unable to close block header store: %v", err)
 		}
 	}
-	if s.RegFilterHeaders != nil {
-		if err := s.RegFilterHeaders.Close(); err != nil {
+	if s.filterHeaders != nil {
+		if err := s.filterHeaders.Close(); err != nil {
 			log.Errorf("Unable to close filter header store: %v", err)
 		}
 	}
@@ -1747,7 +2003,7 @@ func (s *RescanChainSource) GetBlockHeader(
 // height.
 func (s *RescanChainSource) GetFilterHeaderByHeight(
 	height uint32) (*chainhash.Hash, error) {
-	return s.RegFilterHeaders.FetchHeaderByHeight(height)
+	return s.filterHeaders.FetchHeaderByHeight(height)
 }
 
 // Subscribe returns a block subscription that delivers block notifications in

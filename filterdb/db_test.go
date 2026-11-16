@@ -168,3 +168,58 @@ func TestFilterDeletion(t *testing.T) {
 		t.Fatalf("the other filter is gone: %v", err)
 	}
 }
+
+// TestScriptFilterStorage checks that script filters are stored apart from
+// the regular ones, under the same block hash, that a database without any
+// reports none rather than failing, and that they can be deleted.
+func TestScriptFilterStorage(t *testing.T) {
+	cleanUp, database, err := createTestDatabase()
+	defer cleanUp()
+	if err != nil {
+		t.Fatalf("unable to create test db: %v", err)
+	}
+	hash := chainhash.Hash{0x51}
+
+	// Before the first one is stored there is no bucket for them, as in a
+	// database made before script filters.
+	if _, err := database.FetchFilter(&hash, ScriptFilter); err != ErrFilterNotFound {
+		t.Fatalf("script filter of an empty database: %v", err)
+	}
+	if err := database.DeleteFilters([]*chainhash.Hash{&hash}, ScriptFilter); err != nil {
+		t.Fatalf("deleting from an empty database: %v", err)
+	}
+
+	regFilter, err := genRandFilter(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptFilter, err := genRandFilter(70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PutFilter(&hash, regFilter, RegularFilter); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PutFilter(&hash, scriptFilter, ScriptFilter); err != nil {
+		t.Fatal(err)
+	}
+	for fType, want := range map[FilterType]*gcs.Filter{
+		RegularFilter: regFilter, ScriptFilter: scriptFilter,
+	} {
+		got, err := database.FetchFilter(&hash, fType)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("filter of type %d doesn't match: %v", fType, err)
+		}
+	}
+
+	// Deleting the script filter leaves the regular one.
+	if err := database.DeleteFilters([]*chainhash.Hash{&hash}, ScriptFilter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.FetchFilter(&hash, ScriptFilter); err != ErrFilterNotFound {
+		t.Errorf("deleted script filter: %v", err)
+	}
+	if _, err := database.FetchFilter(&hash, RegularFilter); err != nil {
+		t.Errorf("regular filter after deleting the script filter: %v", err)
+	}
+}

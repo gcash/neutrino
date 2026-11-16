@@ -18,6 +18,9 @@ var (
 
 	// regBucket is the bucket that stores the regular filters.
 	regBucket = []byte("regular")
+
+	// scriptBucket is the bucket that stores the script filters.
+	scriptBucket = []byte("script")
 )
 
 // FilterType is a enum-like type that represents the various filter types
@@ -28,6 +31,12 @@ const (
 	// RegularFilter is the filter type of regular filters which contain
 	// outputs and pkScript data pushes.
 	RegularFilter FilterType = iota
+
+	// ScriptFilter is the filter type of script filters (filter type 1),
+	// which contain the scripts of the outputs a block creates and spends
+	// and the token categories of both.  The root of a script filter's
+	// entry tree is not kept with it.
+	ScriptFilter
 )
 
 var (
@@ -112,6 +121,22 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 	}, nil
 }
 
+// writeBucket returns the bucket of a filter type for writing.  The bucket of
+// the script filters is created when it is first written to, as a database
+// made before them lacks it.
+func writeBucket(filters walletdb.ReadWriteBucket,
+	fType FilterType) (walletdb.ReadWriteBucket, error) {
+
+	switch fType {
+	case RegularFilter:
+		return filters.NestedReadWriteBucket(regBucket), nil
+	case ScriptFilter:
+		return filters.CreateBucketIfNotExists(scriptBucket)
+	default:
+		return nil, fmt.Errorf("unknown filter type: %v", fType)
+	}
+}
+
 // putFilter stores a filter in the database according to the corresponding
 // block hash. The passed bucket is expected to be the proper bucket for the
 // passed filter type.
@@ -140,12 +165,9 @@ func (f *FilterStore) PutFilter(hash *chainhash.Hash,
 	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
 		filters := tx.ReadWriteBucket(filterBucket)
 
-		var targetBucket walletdb.ReadWriteBucket
-		switch fType {
-		case RegularFilter:
-			targetBucket = filters.NestedReadWriteBucket(regBucket)
-		default:
-			return fmt.Errorf("unknown filter type: %v", fType)
+		targetBucket, err := writeBucket(filters, fType)
+		if err != nil {
+			return err
 		}
 
 		if filter == nil {
@@ -171,12 +193,9 @@ func (f *FilterStore) DeleteFilters(hashes []*chainhash.Hash,
 	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
 		filters := tx.ReadWriteBucket(filterBucket)
 
-		var targetBucket walletdb.ReadWriteBucket
-		switch fType {
-		case RegularFilter:
-			targetBucket = filters.NestedReadWriteBucket(regBucket)
-		default:
-			return fmt.Errorf("unknown filter type: %v", fType)
+		targetBucket, err := writeBucket(filters, fType)
+		if err != nil {
+			return err
 		}
 
 		for _, hash := range hashes {
@@ -205,6 +224,13 @@ func (f *FilterStore) FetchFilter(blockHash *chainhash.Hash,
 		switch filterType {
 		case RegularFilter:
 			targetBucket = filters.NestedReadBucket(regBucket)
+		case ScriptFilter:
+			// A database made before script filters has no bucket
+			// for them until the first one is stored.
+			targetBucket = filters.NestedReadBucket(scriptBucket)
+			if targetBucket == nil {
+				return ErrFilterNotFound
+			}
 		default:
 			return fmt.Errorf("unknown filter type")
 		}
