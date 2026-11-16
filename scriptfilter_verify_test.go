@@ -13,8 +13,9 @@ import (
 
 // TestScriptFilterHoldsOutputs checks a block against the script filter built
 // for it, which holds the script and the token category of every output and
-// the ID of every transaction, and against filters that lack one of them.  The values read from a filter are
-// checked against the filter's own matching.
+// the ID of every transaction, and against filters that lack one of them.
+// The values read from a filter are checked against the filter's own
+// matching.
 func TestScriptFilterHoldsOutputs(t *testing.T) {
 	c := newDisputeChain(t)
 	block := wire.NewMsgBlock(&c.block.header)

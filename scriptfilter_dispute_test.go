@@ -320,7 +320,8 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 	// A leaf for a script the block doesn't have, pointing at a real
 	// output, then at a real input.
 	for _, kind := range []builder.ScriptLeafKind{builder.ScriptLeafOutput, builder.ScriptLeafSpent,
-		builder.ScriptLeafOutputCategory, builder.ScriptLeafSpentCategory, builder.ScriptLeafTransaction} {
+		builder.ScriptLeafOutputCategory, builder.ScriptLeafSpentCategory,
+		builder.ScriptLeafTransaction} {
 
 		for _, first := range []byte{0x00, 0x7f, 0xff} {
 			check(fmt.Sprintf("made-up leaf of kind %d, key %x..", kind, first),
@@ -335,7 +336,7 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 	// A leaf of a transaction's ID that holds the ID of another transaction
 	// of the block, and a tree without any leaf of a transaction's ID, as a
 	// node serves that builds the filter without them.
-	check("a transaction's leaf with another one's ID", c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
+	otherID := func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
 		for i := range l {
 			if l[i].Kind == builder.ScriptLeafTransaction && l[i].TxIndex == 1 {
 				l[i].Key = builder.TxidKey(*c.block.txs[2].Hash())
@@ -344,12 +345,14 @@ func TestSettleScriptFilterDispute(t *testing.T) {
 		}
 		t.Fatal("no leaf of the ID of transaction 1")
 		return nil
-	}))
-	check("no leaves of transaction IDs", c.liar(true, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
+	}
+	check("a transaction's leaf with another one's ID", c.liar(true, otherID))
+	noIDs := func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
 		return slices.DeleteFunc(l, func(leaf builder.ScriptLeaf) bool {
 			return leaf.Kind == builder.ScriptLeafTransaction
 		})
-	}))
+	}
+	check("no leaves of transaction IDs", c.liar(true, noIDs))
 
 	// A true leaf twice, and two leaves in the wrong order.
 	check("a leaf repeated", c.liar(false, func(l []builder.ScriptLeaf) []builder.ScriptLeaf {
