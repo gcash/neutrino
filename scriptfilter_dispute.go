@@ -217,9 +217,10 @@ func scriptLeafOf(txOut *wire.TxOut, key *[32]byte, category bool) bool {
 // with the given header and height really has the entry.  The transaction the
 // leaf names must be under the block's Merkle root, and its output, or for a
 // leaf of a spent output the output its input spends, must give the leaf's
-// key; for the leaf of a transaction's ID, at index 0, its ID must.  A spent output's transaction must be under the Merkle root of a
-// block of our chain no higher than the block.  smallTxUntil is the last
-// height at which a block may hold a transaction of 64 bytes.
+// key; for the leaf of a transaction's ID, at index 0, its ID must.  A spent
+// output's transaction must be under the Merkle root of a block of our chain
+// no higher than the block.  smallTxUntil is the last height at which a block
+// may hold a transaction of 64 bytes.
 func isTrueScriptLeaf(proof *scriptLeafProof, header *wire.BlockHeader, height uint32,
 	headers scriptHeaderSource, smallTxUntil uint32) bool {
 
