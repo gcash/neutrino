@@ -129,6 +129,33 @@ func TestSearchCategoryOutputs(t *testing.T) {
 	}
 }
 
+// TestSearchCategoryOutputsNotByTxid checks that a category search doesn't
+// fetch the block of the transaction whose ID the category is: a script
+// filter holds that ID too, under a key tagged apart from the category's.
+func TestSearchCategoryOutputsNotByTxid(t *testing.T) {
+	authbase := scriptTestTx(disputeScript(0x21))
+	category := [32]byte(authbase.TxHash())
+	genesis := categoryTestTx(category)
+	genesis.TxIn[0].PreviousOutPoint = wire.OutPoint{Hash: authbase.TxHash()}
+	c := newScriptSearchChain(t, 8, map[int32][]*wire.MsgTx{
+		3: {authbase},
+		6: {genesis},
+	}, nil)
+
+	var found []FoundOutput
+	reached, err := searchCategoryOutputs(c, [][32]byte{category}, 1, 8,
+		func(output FoundOutput) bool {
+			found = append(found, output)
+			return true
+		}, nil, nil, nil)
+	if err != nil || reached != 8 || len(found) != 1 || found[0].Tx != genesis {
+		t.Fatalf("found %+v, reached %d, %v", found, reached, err)
+	}
+	if !slices.Equal(c.fetched, []int32{6}) {
+		t.Errorf("fetched blocks %v, want only the genesis's", c.fetched)
+	}
+}
+
 // TestSearchCategoryOutputsNeedsScriptFilters checks that a category search
 // on regular filters is refused with ErrCategoriesNeedScriptFilters and
 // returns the height before the start, in the direction of the search, and

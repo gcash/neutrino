@@ -217,7 +217,7 @@ func scriptLeafOf(txOut *wire.TxOut, key *[32]byte, category bool) bool {
 // with the given header and height really has the entry.  The transaction the
 // leaf names must be under the block's Merkle root, and its output, or for a
 // leaf of a spent output the output its input spends, must give the leaf's
-// key.  A spent output's transaction must be under the Merkle root of a
+// key; for the leaf of a transaction's ID, at index 0, its ID must.  A spent output's transaction must be under the Merkle root of a
 // block of our chain no higher than the block.  smallTxUntil is the last
 // height at which a block may hold a transaction of 64 bytes.
 func isTrueScriptLeaf(proof *scriptLeafProof, header *wire.BlockHeader, height uint32,
@@ -235,6 +235,9 @@ func isTrueScriptLeaf(proof *scriptLeafProof, header *wire.BlockHeader, height u
 		!checkTxMerkleBranch(tx.TxHash(), leaf.TxIndex, msg.TxBranch, &header.MerkleRoot) {
 
 		return false
+	}
+	if leaf.Kind == builder.ScriptLeafTransaction {
+		return leaf.Index == 0 && builder.TxidKey(tx.TxHash()) == leaf.Key
 	}
 	category := leaf.Kind == builder.ScriptLeafOutputCategory ||
 		leaf.Kind == builder.ScriptLeafSpentCategory
@@ -438,9 +441,11 @@ var scriptLeavesPerRange uint32 = 100000
 
 // maxScriptLeaves returns the most leaves the entry tree of a block we would
 // take can have.  An output takes at least 10 bytes of its block and gives
-// one leaf, or two with tokens, which take more than 10 bytes more, and an
-// input takes more than 40 bytes and gives two at most.  It keeps a peer
-// from sending leaves without end for a tree no block gives.
+// one leaf, or two with tokens, which take more than 10 bytes more, an input
+// takes more than 40 bytes and gives two at most, and a transaction takes at
+// least 10 bytes besides its inputs and outputs and gives the one leaf of its
+// ID.  It keeps a peer from sending leaves without end for a tree no block
+// gives.
 var maxScriptLeaves = func() uint64 {
 	return uint64(wire.MaxBlockPayload()) / 10
 }
