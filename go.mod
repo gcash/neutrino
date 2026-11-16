@@ -56,6 +56,6 @@ require (
 
 tool github.com/gcash/bchd
 
-replace github.com/gcash/bchd => github.com/CyberAshven/bchd v0.22.1-0.20261116143455-e299890569dd
+replace github.com/gcash/bchd => github.com/CyberAshven/bchd v0.22.1-0.20261116153403-d298d34a8767
 
-replace github.com/gcash/bchutil => github.com/CyberAshven/bchutil v0.0.0-20261116141941-b913e251b9ea
+replace github.com/gcash/bchutil => github.com/CyberAshven/bchutil v0.0.0-20261116153250-c6eb297ab5c1
