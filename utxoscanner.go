@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gcash/bchd/chaincfg/chainhash"
+	"github.com/gcash/bchd/wire"
 	"github.com/gcash/bchutil"
 	"github.com/gcash/bchwallet/waddrmgr"
 )
@@ -96,6 +97,10 @@ type UtxoScannerConfig struct {
 
 	// GetBlock fetches a block from the p2p network.
 	GetBlock func(chainhash.Hash, ...QueryOption) (*bchutil.Block, error)
+
+	// FilterType is the type of the filters BlockFilterMatches reads:
+	// regular filters when it isn't set.
+	FilterType wire.FilterType
 }
 
 // UtxoScanner batches calls to GetUtxo so that a single scan can search for
@@ -361,9 +366,16 @@ scanToEnd:
 		// outpoints.
 		fetch := len(newReqs) > 0
 		if !fetch {
+			// A script filter holds the script of each output its
+			// block spends, not the outpoint.
+			entries := reporter.filterEntries
+			if s.cfg.FilterType == wire.GCSFilterScripts {
+				entries = reporter.scriptFilterEntries()
+			}
 			options := rescanOptions{
-				watchList: reporter.filterEntries,
-				quit:      s.quit,
+				watchList:  entries,
+				filterType: s.cfg.FilterType,
+				quit:       s.quit,
 			}
 
 			match, err := s.cfg.BlockFilterMatches(&options, hash)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gcash/bchd/chaincfg/chainhash"
 	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil/gcs/builder"
 )
 
 // batchSpendReporter orchestrates the delivery of spend reports to
@@ -129,6 +130,17 @@ func (b *batchSpendReporter) ProcessBlock(blk *wire.MsgBlock,
 			b.filterEntries = append(b.filterEntries, buf.Bytes())
 		}
 	}
+}
+
+// scriptFilterEntries returns what a script filter is matched with for the
+// watched outpoints: the keys of their outputs' scripts.
+func (b *batchSpendReporter) scriptFilterEntries() [][]byte {
+	entries := make([][]byte, 0, len(b.outpoints))
+	for _, script := range b.outpoints {
+		key := builder.ScriptKey(script)
+		entries = append(entries, key[:])
+	}
+	return entries
 }
 
 // addNewRequests adds a set of new GetUtxoRequests to the spend reporter's
