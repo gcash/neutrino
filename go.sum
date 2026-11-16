@@ -1,7 +1,7 @@
-github.com/CyberAshven/bchd v0.22.1-0.20261116162037-82c32f022ad5 h1:9YPstvuD9E5MrbQM7UEZJ2BUP/3epBXsx57Oitpdn2Q=
-github.com/CyberAshven/bchd v0.22.1-0.20261116162037-82c32f022ad5/go.mod h1:PvouYoTl7fnsuVWCVslqWDTy0M8DDZdZ+bIZzIJAmuA=
-github.com/CyberAshven/bchutil v0.0.0-20261116153250-c6eb297ab5c1 h1:CJIHXYyqrbmxgdTjTa01ylN548h/zuMYmUWIzyA1ydQ=
-github.com/CyberAshven/bchutil v0.0.0-20261116153250-c6eb297ab5c1/go.mod h1:PUl4oVSi94FsHVSOFdAaYG0iFOEG2xrXjet1EEqOSss=
+github.com/CyberAshven/bchd v0.22.1-0.20261116201019-5586000e0e67 h1:NG3sskko3DhhAW7hmLjIU8w22fo38h4Q5uJmbasacB0=
+github.com/CyberAshven/bchd v0.22.1-0.20261116201019-5586000e0e67/go.mod h1:Pnqr/IkArKNm1Y4NVyI/qohSJP7kZi3bRbZLu/1AFbg=
+github.com/CyberAshven/bchutil v0.0.0-20261116200120-a7516c53f9b1 h1:7IuGt5/a8jOulUqofXFKUbQIQWnYpPjwZHX9ZcUGFR4=
+github.com/CyberAshven/bchutil v0.0.0-20261116200120-a7516c53f9b1/go.mod h1:PUl4oVSi94FsHVSOFdAaYG0iFOEG2xrXjet1EEqOSss=
 github.com/aead/siphash v1.0.1 h1:FwHfE/T45KPKYuuSAKyyvE+oPWcaQ+CUmFW0bPlM+kg=
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
