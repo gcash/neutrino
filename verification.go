@@ -29,16 +29,23 @@ func (s *ChainService) verifyBlockFilter(block *bchutil.Block,
 
 	// The genesis filter header isn't synced, and a block whose filter
 	// header isn't synced yet can't be checked.
-	_, filterTip, err := s.RegFilterHeaders.ChainTip()
+	_, filterTip, err := s.filterHeaders.ChainTip()
 	if err != nil || height == 0 || height > filterTip {
 		return nil
 	}
 
-	prevHeader, err := s.RegFilterHeaders.FetchHeaderByHeight(height - 1)
+	// A script filter also lists the scripts of the outputs the block
+	// spends, which the block doesn't hold, so it is checked for what the
+	// block does hold.
+	if s.filterType == wire.GCSFilterScripts {
+		return s.verifyScriptBlockFilter(block, height)
+	}
+
+	prevHeader, err := s.filterHeaders.FetchHeaderByHeight(height - 1)
 	if err != nil {
 		return nil
 	}
-	filterHeader, err := s.RegFilterHeaders.FetchHeaderByHeight(height)
+	filterHeader, err := s.filterHeaders.FetchHeaderByHeight(height)
 	if err != nil {
 		return nil
 	}

@@ -114,6 +114,8 @@ func newHeaderStore(db walletdb.DB, filePath string,
 		flatFileName = "block_headers.bin"
 	case RegularFilter:
 		flatFileName = "reg_filter_headers.bin"
+	case ScriptFilter:
+		flatFileName = "script_filter_headers.bin"
 	default:
 		return nil, fmt.Errorf("unrecognized filter type: %v", hType)
 	}
@@ -687,6 +689,23 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 
 			genesisFilterHash, err = builder.MakeHeaderForFilter(
 				basicFilter,
+				netParams.GenesisBlock.Header.PrevBlock,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+		case ScriptFilter:
+			// The genesis block spends no output.
+			scriptFilter, root, err := builder.BuildScriptFilter(
+				netParams.GenesisBlock, nil,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			genesisFilterHash, err = builder.MakeHeaderForScriptFilter(
+				scriptFilter, root,
 				netParams.GenesisBlock.Header.PrevBlock,
 			)
 			if err != nil {

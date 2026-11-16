@@ -25,7 +25,6 @@ import (
 	"github.com/gcash/bchutil/gcs"
 	"github.com/gcash/bchutil/gcs/builder"
 	"github.com/gcash/neutrino/cache"
-	"github.com/gcash/neutrino/filterdb"
 	"github.com/gcash/neutrino/headerfs"
 	"github.com/gcash/neutrino/headerlist"
 )
@@ -327,7 +326,7 @@ func newBlockManager(s *ChainService,
 
 	// We fetch the genesis header to use for verifying the first received
 	// interval.
-	genesisHeader, err := s.RegFilterHeaders.FetchHeaderByHeight(0)
+	genesisHeader, err := s.filterHeaders.FetchHeaderByHeight(0)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +354,7 @@ func newBlockManager(s *ChainService,
 
 	// Finally, we'll set the filter header tip so any goroutines waiting
 	// on the condition obtain the correct initial state.
-	_, bm.filterHeaderTip, err = s.RegFilterHeaders.ChainTip()
+	_, bm.filterHeaderTip, err = s.filterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
@@ -639,8 +638,8 @@ waitForHeaders:
 		lastHeader.BlockHash())
 	b.newFilterHeadersMtx.RUnlock()
 
-	fType := wire.GCSFilterRegular
-	store := b.server.RegFilterHeaders
+	fType := b.server.filterType
+	store := b.server.filterHeaders
 
 	log.Infof("Starting cfheaders sync for filter_type=%v", fType)
 
@@ -1668,6 +1667,16 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 		return nil, err
 	}
 
+	// A script filter can't be rebuilt from its block, so the peers'
+	// proofs of what their filters hold settle it.
+	if fType == wire.GCSFilterScripts {
+		claims := make(map[string]chainhash.Hash, len(headers))
+		for peer, msg := range headers {
+			claims[peer] = *msg.FilterHashes[filterIndex]
+		}
+		return b.detectBadScriptPeers(header, targetHeight, claims)
+	}
+
 	// Fetch filters from the peers in question.
 	// TODO(halseth): query only peers from headers map.
 	filtersFromPeers := b.fetchFilterFromAllPeers(
@@ -1847,8 +1856,8 @@ func (b *blockManager) repairFilterHeadersIfRequested() bool {
 // it are banned too, and our filter headers are rolled back to the block
 // before, to be synced again. It returns an error if it can't settle it.
 func (b *blockManager) repairFilterHeaders() error {
-	fType := wire.GCSFilterRegular
-	store := b.server.RegFilterHeaders
+	fType := b.server.filterType
+	store := b.server.filterHeaders
 
 	_, storeTip, err := store.ChainTip()
 	if err != nil {
@@ -1957,22 +1966,27 @@ findDifference:
 		return err
 	}
 	blockHash := blockHeader.BlockHash()
-	block, err := b.server.fetchBlock(
-		wire.NewInvVect(wire.InvTypeBlock, &blockHash), height,
-		QueryQuit(b.quit),
-	)
-	if err != nil {
-		return err
-	}
-	filter, err := builder.BuildBasicFilter(block.MsgBlock())
-	if err != nil {
-		return err
-	}
 	prevHeader, err = store.FetchHeaderByHeight(height - 1)
 	if err != nil {
 		return err
 	}
-	want, err := builder.MakeHeaderForFilter(filter, *prevHeader)
+	var want chainhash.Hash
+	if fType == wire.GCSFilterScripts {
+		// A script filter can't be built from its block.  The peers
+		// that differ are told apart by their proofs instead, and the
+		// filter header that is left is the one to keep.
+		claims := make(map[string]chainhash.Hash, len(peerHeaders))
+		for peer, filterHeaders := range peerHeaders {
+			claims[peer] = filterHeaders[height-start]
+		}
+		want, err = b.scriptFilterHeaderOfPeers(
+			blockHeader, height, *prevHeader, claims,
+		)
+	} else {
+		want, err = b.regularFilterHeaderOfBlock(
+			blockHash, height, *prevHeader,
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -2025,6 +2039,25 @@ findDifference:
 		"%d", blockHash, height, height-1)
 
 	return b.rollBackFilterHeaders(height - 1)
+}
+
+// regularFilterHeaderOfBlock fetches a block and returns the header of the
+// regular filter built from it, after the previous block's filter header.
+func (b *blockManager) regularFilterHeaderOfBlock(blockHash chainhash.Hash,
+	height uint32, prevHeader chainhash.Hash) (chainhash.Hash, error) {
+
+	block, err := b.server.fetchBlock(
+		wire.NewInvVect(wire.InvTypeBlock, &blockHash), height,
+		QueryQuit(b.quit),
+	)
+	if err != nil {
+		return chainhash.Hash{}, err
+	}
+	filter, err := builder.BuildBasicFilter(block.MsgBlock())
+	if err != nil {
+		return chainhash.Hash{}, err
+	}
+	return builder.MakeHeaderForFilter(filter, prevHeader)
 }
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
@@ -2093,9 +2126,24 @@ func (b *blockManager) fetchFilterFromAllPeers(
 	height uint32, blockHash chainhash.Hash,
 	filterType wire.FilterType) map[string]*gcs.Filter {
 
+	served := b.fetchServedFilters(height, blockHash, filterType)
+	filters := make(map[string]*gcs.Filter, len(served))
+	for peer, f := range served {
+		filters[peer] = f.filter
+	}
+	return filters
+}
+
+// fetchServedFilters requests the filter of a block from every peer, like
+// fetchFilterFromAllPeers, and returns each as it was served: a script filter
+// with the root of the block's entry tree that came in front of it.
+func (b *blockManager) fetchServedFilters(
+	height uint32, blockHash chainhash.Hash,
+	filterType wire.FilterType) map[string]servedFilter {
+
 	// We'll use this map to collate all responses we receive from each
 	// peer.
-	filterResponses := make(map[string]*gcs.Filter)
+	filterResponses := make(map[string]servedFilter)
 
 	// We'll now request the target filter from each peer, using a stop
 	// hash at the target block hash to ensure we only get a single filter.
@@ -2118,9 +2166,8 @@ func (b *blockManager) fetchFilterFromAllPeers(
 				// Now that we know we have the proper filter,
 				// we'll decode it into an object the caller
 				// can utilize.
-				gcsFilter, err := gcs.FromNBytes(
-					builder.DefaultP, builder.DefaultM,
-					response.Data,
+				gcsFilter, root, err := parseServedFilter(
+					filterType, response.Data,
 				)
 				if err != nil {
 					// Malformed filter data. We can ignore
@@ -2131,7 +2178,10 @@ func (b *blockManager) fetchFilterFromAllPeers(
 				// Now that we're able to properly parse this
 				// filter, we'll assign it to its source peer,
 				// and wait for the next response.
-				filterResponses[sp.Addr()] = gcsFilter
+				filterResponses[sp.Addr()] = servedFilter{
+					filter: gcsFilter,
+					root:   root,
+				}
 
 			default:
 			}
@@ -2443,7 +2493,7 @@ func (b *blockManager) IsFullySynced() bool {
 		return false
 	}
 
-	_, filterHeaderHeight, err := b.server.RegFilterHeaders.ChainTip()
+	_, filterHeaderHeight, err := b.server.filterHeaders.ChainTip()
 	if err != nil {
 		return false
 	}
@@ -3655,7 +3705,8 @@ func (b *blockManager) notifyFilterHeaderRollback(height uint32) {
 // notified as disconnected, as they're still in the chain, but block
 // subscribers are notified of them as connected again then.
 func (b *blockManager) rollBackFilterHeaders(height uint32) error {
-	store := b.server.RegFilterHeaders
+	store := b.server.filterHeaders
+	dbFilterType := dbFilterTypeOf(b.server.filterType)
 
 	// Filter queries hold this lock to keep and return the filters they
 	// fetch, and we'll count the rollback under it, so that a query that
@@ -3685,7 +3736,7 @@ func (b *blockManager) rollBackFilterHeaders(height uint32) error {
 
 		_, err = b.server.FilterCache.Delete(cache.FilterCacheKey{
 			BlockHash:  hash,
-			FilterType: filterdb.RegularFilter,
+			FilterType: dbFilterType,
 		})
 		if err != nil {
 			return err
@@ -3694,7 +3745,7 @@ func (b *blockManager) rollBackFilterHeaders(height uint32) error {
 		batch = append(batch, &hash)
 		if len(batch) == filterRollbackBatchSize || h == tipHeight {
 			err := b.server.FilterDB.DeleteFilters(
-				batch, filterdb.RegularFilter,
+				batch, dbFilterType,
 			)
 			if err != nil {
 				return err

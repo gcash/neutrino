@@ -29,7 +29,7 @@ func (h *headerStore) singleTruncate() error {
 	switch h.indexType {
 	case Block:
 		truncateLength = 80
-	case RegularFilter:
+	case RegularFilter, ScriptFilter:
 		truncateLength = 32
 	default:
 		return fmt.Errorf("unknown index type: %v", h.indexType)
