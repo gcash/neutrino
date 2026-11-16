@@ -303,17 +303,19 @@ func (s *ChainService) probeScriptFilters(sp *ServerPeer) {
 }
 
 // ErrScriptFilterLacksOutput is returned when a block's script filter lacks
-// the script or the token category of one of the block's outputs.
+// the script or the token category of one of the block's outputs, or the ID
+// of one of its transactions.
 var errScriptFilterLacksOutput = errors.New("script filter lacks an output " +
-	"of its block")
+	"or a transaction ID of its block")
 
 // scriptFilterHoldsOutputs checks that a block's script filter holds the
-// script and the token category of every output the block creates.  The
-// scripts of the outputs it spends are not in the block, so they can't be
-// checked this way.
+// script and the token category of every output the block creates, and the
+// ID of every transaction.  The scripts of the outputs it spends are not in
+// the block, so they can't be checked this way.
 func scriptFilterHoldsOutputs(filter *gcs.Filter, block *wire.MsgBlock) error {
 	var keys [][32]byte
 	for _, tx := range block.Transactions {
+		keys = append(keys, builder.TxidKey(tx.TxHash()))
 		for _, txOut := range tx.TxOut {
 			if script := txOut.PkScript; len(script) > 0 && script[0] != 0x6a {
 				keys = append(keys, builder.ScriptKey(script))
@@ -409,7 +411,7 @@ func (s *ChainService) verifyScriptBlockFilter(block *bchutil.Block,
 	}
 
 	log.Warnf("The script filter synced for block %v at height %d doesn't "+
-		"hold its outputs: %v", block.Hash(), height, err)
+		"hold its outputs and transaction IDs: %v", block.Hash(), height, err)
 
 	s.blockManager.requestFilterHeaderRepair()
 

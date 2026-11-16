@@ -12,8 +12,8 @@ import (
 )
 
 // TestScriptFilterHoldsOutputs checks a block against the script filter built
-// for it, which holds the script and the token category of every output, and
-// against filters that lack one of them.  The values read from a filter are
+// for it, which holds the script and the token category of every output and
+// the ID of every transaction, and against filters that lack one of them.  The values read from a filter are
 // checked against the filter's own matching.
 func TestScriptFilterHoldsOutputs(t *testing.T) {
 	c := newDisputeChain(t)
@@ -50,14 +50,16 @@ func TestScriptFilterHoldsOutputs(t *testing.T) {
 	}
 
 	// A filter without the keys of one kind of leaf in turn: the block is
-	// refused when an output's script or category is missing, and passes
-	// when only what it spends is, as the block doesn't hold that.
+	// refused when an output's script or category, or a transaction's ID,
+	// is missing, and passes when only what it spends is, as the block
+	// doesn't hold that.
 	for _, kind := range []builder.ScriptLeafKind{builder.ScriptLeafOutput,
-		builder.ScriptLeafOutputCategory, builder.ScriptLeafSpent} {
+		builder.ScriptLeafOutputCategory, builder.ScriptLeafSpent, builder.ScriptLeafTransaction} {
 
 		outputKeys := make(map[[32]byte]struct{})
 		for _, leaf := range c.leaves {
-			if leaf.Kind == builder.ScriptLeafOutput || leaf.Kind == builder.ScriptLeafOutputCategory {
+			if leaf.Kind == builder.ScriptLeafOutput || leaf.Kind == builder.ScriptLeafOutputCategory ||
+				leaf.Kind == builder.ScriptLeafTransaction {
 				outputKeys[leaf.Key] = struct{}{}
 			}
 		}
